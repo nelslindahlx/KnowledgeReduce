@@ -1,0 +1,462 @@
+
+================================================================================
+CODE CELL 1
+================================================================================
+# Step to install necessary libraries
+!pip uninstall community -y
+!pip install requests beautifulsoup4 networkx spacy python-louvain
+!python -m spacy download en_core_web_md
+
+# One of the installs neesd a runtime restart
+
+import os
+import IPython
+
+# Path for the marker file
+marker_path = '/content/runtime_restarted.txt'
+
+# First check if the marker file exists
+if os.path.exists(marker_path):
+    print("Runtime restarted successfully. All dependencies should now be loaded.")
+    # Remove the marker file to clean up
+    os.remove(marker_path)
+else:
+    # Create the marker file
+    with open(marker_path, 'w') as f:
+        f.write('Runtime will be restarted.')
+
+    # Restart the runtime
+    print("Restarting the runtime to load all dependencies...")
+    os.kill(os.getpid(), 9)  # Send SIGKILL signal to the current process
+
+================================================================================
+CODE CELL 2
+================================================================================
+# Second check if the marker file exists
+
+import os
+import IPython
+
+# Path for the marker file
+marker_path = '/content/runtime_restarted.txt'
+
+# Check if the marker file exists
+if os.path.exists(marker_path):
+    print("Runtime restarted successfully. All dependencies should now be loaded.")
+    # Remove the marker file to clean up
+    os.remove(marker_path)
+else:
+    # Create the marker file
+    with open(marker_path, 'w') as f:
+        f.write('Runtime will be restarted.')
+
+    # Restart the runtime
+    print("Restarting the runtime to load all dependencies...")
+    os.kill(os.getpid(), 9)  # Send SIGKILL signal to the current process
+
+================================================================================
+CODE CELL 3
+================================================================================
+# Importing necessary libraries
+import requests
+import difflib
+import spacy
+import json
+import os
+import glob
+import networkx as nx
+import matplotlib.pyplot as plt
+import community as community_louvain  # python-louvain library
+
+# Running the proper from statements
+from bs4 import BeautifulSoup
+from datetime import datetime
+from enum import Enum
+
+# Define the classes
+class ReliabilityRating(Enum):
+    UNVERIFIED = 1
+    POSSIBLY_TRUE = 2
+    LIKELY_TRUE = 3
+    VERIFIED = 4
+
+class KnowledgeGraph:
+    def __init__(self):
+        self.graph = nx.DiGraph()
+
+    def calculate_quality_score(self, reliability_rating, usage_count):
+        # Adjusted to handle string representation of Enum
+        rating_value = ReliabilityRating[reliability_rating].value if isinstance(reliability_rating, str) else reliability_rating.value
+        base_score = 10 * rating_value
+        usage_bonus = 2 * usage_count
+        return base_score + usage_bonus
+
+    def add_fact(self, fact_id, fact_statement, category, tags, date_recorded, last_updated,
+                 reliability_rating, source_id, source_title, author_creator,
+                 publication_date, url_reference, related_facts, contextual_notes,
+                 access_level, usage_count):
+        # Convert list and datetime objects to strings
+        tags_str = ', '.join(tags) if tags else ''
+        date_recorded_str = date_recorded.isoformat() if isinstance(date_recorded, datetime) else date_recorded
+        last_updated_str = last_updated.isoformat() if isinstance(last_updated, datetime) else last_updated
+        publication_date_str = publication_date.isoformat() if isinstance(publication_date, datetime) else publication_date
+
+        quality_score = self.calculate_quality_score(reliability_rating, usage_count)
+        self.graph.add_node(fact_id,
+                            fact_statement=fact_statement,
+                            category=category,
+                            tags=tags_str,
+                            date_recorded=date_recorded_str,
+                            last_updated=last_updated_str,
+                            reliability_rating=reliability_rating,
+                            quality_score=quality_score,
+                            source_id=source_id,
+                            source_title=source_title,
+                            author_creator=author_creator,
+                            publication_date=publication_date_str,
+                            url_reference=url_reference,
+                            contextual_notes=contextual_notes,
+                            access_level=access_level,
+                            usage_count=usage_count)
+
+        for related_fact_id in related_facts:
+            self.graph.add_edge(fact_id, related_fact_id)
+
+    def update_quality_score(self, fact_id):
+        if fact_id not in self.graph:
+            raise ValueError("Fact ID not found in the graph.")
+        fact = self.graph.nodes[fact_id]
+        new_score = self.calculate_quality_score(fact['reliability_rating'], fact['usage_count'])
+        self.graph.nodes[fact_id]['quality_score'] = new_score
+
+    def get_fact(self, fact_id):
+        if fact_id not in self.graph:
+            raise ValueError("Fact ID not found in the graph.")
+        return self.graph.nodes[fact_id]
+
+    def save_to_file(self, filename):
+        facts_to_save = []
+        for fact_id, fact_data in self.graph.nodes(data=True):
+            facts_to_save.append(fact_data)
+
+        with open(filename, 'w') as file:
+            json.dump(facts_to_save, file, indent=4)
+
+================================================================================
+CODE CELL 4
+================================================================================
+# Function to extract text from a soup object
+def extract_text(element):
+    return ' '.join(element.stripped_strings)
+
+# Generic function to find facts in common HTML structures
+def find_facts(soup):
+    facts = []
+
+    # Look for paragraphs
+    for p in soup.find_all('p'):
+        text = extract_text(p)
+        if text: facts.append(text)
+
+    # Look for headings
+    for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+        for header in soup.find_all(header_tag):
+            text = extract_text(header)
+            if text: facts.append(text)
+
+    # Look for list items
+    for li in soup.find_all('li'):
+        text = extract_text(li)
+        if text: facts.append(text)
+
+    return facts
+
+# URLs of the websites to scrape
+urls = ["https://civichonors.com/", "https://www.nelslindahl.com/"]
+
+# List to hold all facts from both websites
+all_facts = []
+
+# Iterate through each URL, scrape its content, and extract facts
+for url in urls:
+    response = requests.get(url)
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.text, 'html.parser')
+        facts = find_facts(soup)
+        all_facts.extend(facts)
+    else:
+        print(f"Failed to retrieve content from {url}")
+
+# all_facts now contains facts from both websites
+print(f"Total facts extracted: {len(all_facts)}")
+
+================================================================================
+CODE CELL 5
+================================================================================
+# Enum for Reliability Rating
+class ReliabilityRating:
+    LIKELY_TRUE = 'Likely True'
+    # ... other reliability ratings ...
+
+# KnowledgeGraph class
+class KnowledgeGraph:
+    def __init__(self):
+        self.data = []
+
+    def add_fact(self, fact_id, fact_statement, category, tags, date_recorded, last_updated,
+                 reliability_rating, source_id, source_title, author_creator, publication_date,
+                 url_reference, related_facts, contextual_notes, access_level, usage_count):
+        self.data.append({
+            'fact_id': fact_id,
+            'fact_statement': fact_statement,
+            'category': category,
+            'tags': tags,
+            'date_recorded': date_recorded,
+            'last_updated': last_updated,
+            'reliability_rating': reliability_rating,
+            'source_id': source_id,
+            'source_title': source_title,
+            'author_creator': author_creator,
+            'publication_date': publication_date,
+            'url_reference': url_reference,
+            'related_facts': related_facts,
+            'contextual_notes': contextual_notes,
+            'access_level': access_level,
+            'usage_count': usage_count
+        })
+
+    def save_to_file(self, filename):
+        with open(filename, 'w') as file:
+            json.dump(self.data, file, default=str, indent=4)
+
+# Function to extract text from a soup object
+def extract_text(element):
+    return ' '.join(element.stripped_strings)
+
+# Generic function to find facts in common HTML structures
+def find_facts(soup):
+    facts = []
+    for p in soup.find_all('p'):
+        text = extract_text(p)
+        if text: facts.append(text)
+    for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+        for header in soup.find_all(header_tag):
+            text = extract_text(header)
+            if text: facts.append(text)
+    for li in soup.find_all('li'):
+        text = extract_text(li)
+        if text: facts.append(text)
+    return facts
+
+# Function to scrape a website and return its BeautifulSoup object
+def scrape_website(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return BeautifulSoup(response.text, 'html.parser')
+    except requests.exceptions.RequestException as e:
+        print(f"Error during requests to {url}: {e}")
+        return None
+
+# Initialize the KnowledgeGraph
+kg = KnowledgeGraph()
+
+# URLs of the websites to scrape
+urls = {
+    "CivicHonors": "https://civichonors.com/",
+    "NelsLindahl": "https://www.nelslindahl.com/"
+}
+
+# Add facts from each website to the KnowledgeGraph
+for source_id, url in urls.items():
+    soup = scrape_website(url)
+    if soup:
+        facts = find_facts(soup)
+        for i, fact in enumerate(facts):
+            kg.add_fact(
+                fact_id=f"{source_id}_{i}",
+                fact_statement=fact,
+                category="General",
+                tags=[source_id, "WebScraped"],
+                date_recorded=datetime.now(),
+                last_updated=datetime.now(),
+                reliability_rating=ReliabilityRating.LIKELY_TRUE,
+                source_id=source_id,
+                source_title=f"{source_id} Website",
+                author_creator="Web Scraping",
+                publication_date=datetime.now(),
+                url_reference=url,
+                related_facts=[],
+                contextual_notes=f"Extracted from {source_id} website",
+                access_level="Public",
+                usage_count=0
+            )
+
+# Save the facts to a file
+filename = 'knowledge_graph_facts.json'
+kg.save_to_file(filename)
+print(f"Facts saved to {filename}")
+
+================================================================================
+CODE CELL 6
+================================================================================
+# Print the total number of facts extracted
+print(f"Total facts extracted: {len(kg.data)}")
+
+# Display the first 10 facts, if available
+for i in range(min(10, len(kg.data))):
+    fact = kg.data[i]['fact_statement']  # Access the fact statement directly from the data list
+    print(f"Fact {i+1}: {fact}")
+
+================================================================================
+CODE CELL 7
+================================================================================
+def remove_duplicate_facts(knowledge_graph):
+    unique_facts = set()
+    unique_data = []
+
+    for fact_data in knowledge_graph.data:
+        fact_statement = fact_data['fact_statement']
+        if fact_statement not in unique_facts:
+            unique_facts.add(fact_statement)
+            unique_data.append(fact_data)
+
+    # Replace the original data with the unique data
+    knowledge_graph.data = unique_data
+
+# Call the function to remove duplicate facts
+remove_duplicate_facts(kg)
+
+# Optional: Print the total number of unique facts remaining
+print(f"Total unique facts remaining: {len(kg.data)}")
+
+# Save the facts to a file
+filename = 'unique_knowledge_graph_facts.json'
+kg.save_to_file(filename)
+print(f"Facts saved to {filename}")
+
+
+================================================================================
+CODE CELL 8
+================================================================================
+from difflib import SequenceMatcher
+
+def advanced_cleaning(knowledge_graph, similarity_threshold=0.8, short_fact_threshold=50):
+    # Remove short facts
+    knowledge_graph.data = [fact for fact in knowledge_graph.data if len(fact['fact_statement']) >= short_fact_threshold]
+
+    # Remove similar facts
+    unique_facts = []
+    for fact in knowledge_graph.data:
+        if not any(SequenceMatcher(None, f['fact_statement'], fact['fact_statement']).ratio() > similarity_threshold for f in unique_facts):
+            unique_facts.append(fact)
+
+    knowledge_graph.data = unique_facts
+
+# Call the function for advanced cleaning
+advanced_cleaning(kg)
+
+# Optional: Print the total number of facts after cleaning
+print(f"Total facts after advanced cleaning: {len(kg.data)}")
+
+# Save the facts to a file
+filename = 'advanced_knowledge_graph_facts.json'
+kg.save_to_file(filename)
+print(f"Facts saved to {filename}")
+
+================================================================================
+CODE CELL 9
+================================================================================
+import spacy
+
+# Load spaCy English model (make sure to have it installed)
+nlp = spacy.load("en_core_web_md")
+
+def super_aggressive_cleaning(knowledge_graph, similarity_threshold=0.85):
+    processed_facts = []
+    unique_facts = []
+
+    # Pre-process each fact with spaCy
+    for fact in knowledge_graph.data:
+        doc = nlp(fact['fact_statement'])
+        processed_facts.append((fact, doc))
+
+    # Compare each fact to others for similarity
+    for fact, doc in processed_facts:
+        if not any(doc.similarity(other_doc) > similarity_threshold for _, other_doc in processed_facts if other_doc != doc):
+            unique_facts.append(fact)
+
+    knowledge_graph.data = unique_facts
+
+# Call the function for super aggressive cleaning
+super_aggressive_cleaning(kg)
+
+# Print the total number of facts after super aggressive cleaning
+print(f"Total facts after super aggressive cleaning: {len(kg.data)}")
+
+# Save the facts to a file
+filename = 'remaining_facts.json'
+kg.save_to_file(filename)
+print(f"Facts saved to {filename}")
+
+
+================================================================================
+CODE CELL 10
+================================================================================
+import json
+import networkx as nx
+
+class KnowledgeGraphPortable:
+    def __init__(self, knowledge_graph):
+        # Check if knowledge_graph is a networkx graph or a list-based structure
+        if isinstance(knowledge_graph, (nx.Graph, nx.DiGraph, nx.MultiGraph, nx.MultiDiGraph)):
+            self.graph = knowledge_graph
+        elif hasattr(knowledge_graph, 'data') and isinstance(knowledge_graph.data, list):
+            self.graph = self.convert_list_to_graph(knowledge_graph.data)
+        else:
+            raise ValueError("Unsupported knowledge_graph structure")
+
+    def convert_list_to_graph(self, data_list):
+        # Convert a list of facts to a networkx graph (if necessary)
+        G = nx.DiGraph()
+        for item in data_list:
+            # Assuming each item has 'fact_id' and 'fact_statement'
+            G.add_node(item['fact_id'], **item)
+        return G
+
+    def serialize_graph_to_json(self, output_file):
+        # Convert graph to a dictionary or suitable structure
+        try:
+            graph_data = nx.node_link_data(self.graph)
+            with open(output_file, 'w') as file:
+                json.dump(graph_data, file, indent=4)
+            print(f"Graph serialized to JSON. File saved as {output_file}")
+            return True
+        except Exception as e:
+            print(f"Error in serializing graph to JSON: {e}")
+            return False
+
+# Usage example
+kg_portable = KnowledgeGraphPortable(kg)
+output_file = 'serialized_kg.json'  # Specify the filename for the serialized graph
+result = kg_portable.serialize_graph_to_json(output_file)
+
+if result:
+    print("Serialization of Knowledge Graph completed successfully.")
+else:
+    print("Serialization of Knowledge Graph failed.")
+
+
+================================================================================
+CODE CELL 11
+================================================================================
+# Specify the directory to search for JSON files, '.' for current directory
+directory_to_search = '.'
+
+# List all JSON files in the specified directory
+json_files = glob.glob(os.path.join(directory_to_search, '*.json'))
+
+# Print the list of JSON files
+print("List of JSON files created:")
+for file in json_files:
+    print(file)
