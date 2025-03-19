@@ -1,0 +1,344 @@
+{
+  "nodes": [
+    {
+      "id": "organization:apple_inc.",
+      "text": "Apple Inc.",
+      "type": "organization",
+      "mentions": 2
+    },
+    {
+      "id": "person:steve_jobs",
+      "text": "Steve Jobs",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "person:steve_wozniak",
+      "text": "Steve Wozniak",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "person:ronald_wayne",
+      "text": "Ronald Wayne",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:april_1976",
+      "text": "April 1976",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "location:cupertino",
+      "text": "Cupertino",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "location:california",
+      "text": "California",
+      "type": "location",
+      "mentions": 4
+    },
+    {
+      "id": "person:tim_cook",
+      "text": "Tim Cook",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "organization:apple",
+      "text": "Apple",
+      "type": "organization",
+      "mentions": 4
+    },
+    {
+      "id": "organization:iphone",
+      "text": "iPhone",
+      "type": "organization",
+      "mentions": 2
+    },
+    {
+      "id": "date:2007",
+      "text": "2007",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "organization:microsoft_corporation",
+      "text": "Microsoft Corporation",
+      "type": "organization",
+      "mentions": 2
+    },
+    {
+      "id": "person:bill_gates",
+      "text": "Bill Gates",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "person:paul_allen",
+      "text": "Paul Allen",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:april_1975",
+      "text": "April 1975",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "location:redmond",
+      "text": "Redmond",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "location:washington",
+      "text": "Washington",
+      "type": "location",
+      "mentions": 4
+    },
+    {
+      "id": "person:satya_nadella",
+      "text": "Satya Nadella",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "organization:microsoft",
+      "text": "Microsoft",
+      "type": "organization",
+      "mentions": 4
+    },
+    {
+      "id": "location:windows",
+      "text": "Windows",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "misc:millions",
+      "text": "millions",
+      "type": "misc",
+      "mentions": 2
+    },
+    {
+      "id": "organization:amazon",
+      "text": "Amazon",
+      "type": "organization",
+      "mentions": 6
+    },
+    {
+      "id": "person:jeff_bezos",
+      "text": "Jeff Bezos",
+      "type": "person",
+      "mentions": 4
+    },
+    {
+      "id": "date:july_1994",
+      "text": "July 1994",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "location:seattle",
+      "text": "Seattle",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "person:andy_jassy",
+      "text": "Andy Jassy",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:2021",
+      "text": "2021",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "organization:tesla,_inc.",
+      "text": "Tesla, Inc.",
+      "type": "organization",
+      "mentions": 2
+    },
+    {
+      "id": "person:martin_eberhard",
+      "text": "Martin Eberhard",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "person:marc_tarpenning",
+      "text": "Marc Tarpenning",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:july_2003",
+      "text": "July 2003",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "person:elon_musk",
+      "text": "Elon Musk",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:2004",
+      "text": "2004",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "location:austin",
+      "text": "Austin",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "location:texas",
+      "text": "Texas",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "organization:google",
+      "text": "Google",
+      "type": "organization",
+      "mentions": 6
+    },
+    {
+      "id": "person:larry_page",
+      "text": "Larry Page",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "person:sergey_brin",
+      "text": "Sergey Brin",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "date:september_1998",
+      "text": "September 1998",
+      "type": "date",
+      "mentions": 2
+    },
+    {
+      "id": "organization:alphabet_inc.",
+      "text": "Alphabet Inc.",
+      "type": "organization",
+      "mentions": 2
+    },
+    {
+      "id": "location:mountain_view",
+      "text": "Mountain View",
+      "type": "location",
+      "mentions": 2
+    },
+    {
+      "id": "person:sundar_pichai",
+      "text": "Sundar Pichai",
+      "type": "person",
+      "mentions": 2
+    },
+    {
+      "id": "organization:alphabet",
+      "text": "Alphabet",
+      "type": "organization",
+      "mentions": 2
+    }
+  ],
+  "edges": [
+    {
+      "source": "organization:apple",
+      "target": "organization:iphone",
+      "type": "release",
+      "sentence": "Apple released the iPhone in 2007, which revolutionized the smartphone industry.\n\n",
+      "confidence": 0.5,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "organization:apple",
+      "target": "date:2007",
+      "type": "release",
+      "sentence": "Apple released the iPhone in 2007, which revolutionized the smartphone industry.\n\n",
+      "confidence": 0.5,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "organization:microsoft_corporation",
+      "target": "date:april_1975",
+      "type": "found",
+      "sentence": "Microsoft Corporation was founded by Bill Gates and Paul Allen in April 1975.",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "organization:amazon",
+      "target": "date:july_1994",
+      "type": "found",
+      "sentence": "Amazon was founded by Jeff Bezos in July 1994.",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "organization:amazon",
+      "target": "location:seattle",
+      "type": "headquarter",
+      "sentence": "Amazon is headquartered in Seattle, Washington.",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "person:jeff_bezos",
+      "target": "date:2021",
+      "type": "step",
+      "sentence": "Andy Jassy became the CEO of Amazon after Jeff Bezos stepped down in 2021.\n\n",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "person:elon_musk",
+      "target": "date:2004",
+      "type": "join",
+      "sentence": "Elon Musk joined the company in 2004 and later became CEO.",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    },
+    {
+      "source": "organization:google",
+      "target": "date:september_1998",
+      "type": "found",
+      "sentence": "Google was founded by Larry Page and Sergey Brin in September 1998.",
+      "confidence": 1.0,
+      "sources": [
+        "unknown"
+      ]
+    }
+  ]
+}
