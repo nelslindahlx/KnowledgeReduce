@@ -1,0 +1,23 @@
+# KnowledgeReduce Requirements
+# Core dependencies
+networkx==3.1
+nltk==3.8.1
+spacy==3.7.2
+beautifulsoup4==4.12.2
+requests==2.31.0
+
+# NLP dependencies
+transformers==4.36.2
+torch==2.1.2
+sentence-transformers==2.2.2
+
+# Visualization dependencies
+matplotlib==3.8.2
+pyvis==0.3.2
+
+# Development dependencies
+pytest==7.4.3
+pytest-cov==4.1.0
+black==23.11.0
+isort==5.12.0
+mypy==1.7.1
