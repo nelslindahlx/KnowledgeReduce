@@ -16,6 +16,7 @@ from knowledgereduce.export import (
     export_gexf,
     export_graphml,
     export_layer_json,
+    export_layer_markdown,
     export_layer_sharded,
 )
 from knowledgereduce.ingest import (
@@ -27,6 +28,11 @@ from knowledgereduce.ingest import (
 )
 from knowledgereduce.map import load_mapped_batches, save_mapped_batches
 from knowledgereduce.mcp import create_mcp_server
+from knowledgereduce.mcp.server import (
+    build_graph_analytics_payload,
+    build_layer_lineage_payload,
+    build_layers_payload,
+)
 from knowledgereduce.models import (
     ConflictStrategy,
     IngestionError,
@@ -306,7 +312,9 @@ def query_command(
 @app.command("export")
 def export_command(
     layer_id: str = typer.Argument(..., help="Layer ID to export."),
-    format: str = typer.Option("json", "--format", "-f", help="json|sharded_jsonl|graphml|gexf"),
+    format: str = typer.Option(
+        "json", "--format", "-f", help="json|sharded_jsonl|graphml|gexf|markdown"
+    ),
     output: Path = typer.Option(..., "--output", "-o", help="Output file or directory."),  # noqa: B008
     shard_size: int = typer.Option(100, "--shard-size"),
     overwrite: bool = typer.Option(False, "--overwrite"),
@@ -314,7 +322,7 @@ def export_command(
         Path(".knowledgereduce_store"), "--store", "-s"
     ),
 ) -> None:
-    """Export a layer to portable JSON, sharded JSONL, GraphML, or GEXF."""
+    """Export a layer to portable JSON, sharded JSONL, GraphML, GEXF, or Markdown."""
     try:
         layer_data = DuckDBParquetStore(store_dir).load_layer(layer_id)
         fmt = format.strip().lower()
@@ -328,6 +336,8 @@ def export_command(
             out = export_graphml(layer_data, output)
         elif fmt == "gexf":
             out = export_gexf(layer_data, output)
+        elif fmt == "markdown":
+            out = export_layer_markdown(layer_data, output)
         else:
             raise KnowledgeReduceError(f"Unsupported format {format!r}.")
         typer.echo(str(out))
@@ -425,6 +435,70 @@ def resolve_conflict_command(
                 indent=2,
             )
         )
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("layers")
+def layers_command(
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """List persisted knowledge layers and their metadata."""
+    try:
+        payload = build_layers_payload(DuckDBParquetStore(store_dir))
+        typer.echo(json.dumps(payload, indent=2))
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("lineage")
+def lineage_command(
+    layer_id: str = typer.Argument(..., help="Layer ID to inspect."),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Display ancestor and descendant layer lineage for a stored layer."""
+    try:
+        mgr = StackManager(DuckDBParquetStore(store_dir))
+        typer.echo(json.dumps(build_layer_lineage_payload(mgr, layer_id), indent=2))
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("analyze")
+def analyze_command(
+    layer_id: str = typer.Argument(..., help="Layer ID to analyze."),
+    metric: str = typer.Option("pagerank", "--metric", "-m", help="pagerank|degree|betweenness"),
+    top_k: int = typer.Option(10, "--top-k", help="Maximum ranked central nodes."),
+    communities: bool = typer.Option(
+        True, "--communities/--no-communities", help="Compute Louvain communities."
+    ),
+    path_from: str | None = typer.Option(None, "--path-from", help="Shortest-path source ID."),
+    path_to: str | None = typer.Option(None, "--path-to", help="Shortest-path target ID."),
+    max_hops: int = typer.Option(6, "--max-hops", help="Maximum shortest-path hop count."),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Compute node centrality, Louvain communities, and optional shortest paths."""
+    try:
+        payload = build_graph_analytics_payload(
+            DuckDBParquetStore(store_dir),
+            layer_id,
+            metric=metric,
+            top_k=top_k,
+            include_communities=communities,
+            path_source_id=path_from,
+            path_target_id=path_to,
+            max_hops=max_hops,
+        )
+        typer.echo(json.dumps(payload, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc

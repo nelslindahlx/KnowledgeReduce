@@ -53,6 +53,9 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         "resolve_conflict",
         "export_layer",
         "validate_layer",
+        "list_layers",
+        "get_layer_lineage",
+        "analyze_graph",
     }
 
     # 1. Ingest local CSV + mocked web page
@@ -213,6 +216,7 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         ("sharded_jsonl", "exports/sharded"),
         ("graphml", "exports/ch.graphml"),
         ("gexf", "exports/ch.gexf"),
+        ("markdown", "exports/ch.md"),
         ("parquet", "exports/parquet_copy"),
     ]:
         exp_res = await server.call_tool(
@@ -221,6 +225,39 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         )
         assert not exp_res.is_error
         assert (ws / out_rel).exists()
+
+    md_text = (ws / "exports/ch.md").read_text(encoding="utf-8")
+    assert "## Key Claims" in md_text
+
+    # 9b. Layer catalog, lineage inspection, and graph analytics tools
+    layers_res = await server.call_tool("list_layers", {})
+    layers_payload = json.loads(layers_res.content[0].text)  # type: ignore[union-attr]
+    assert layers_payload["count"] == 3
+    assert {item["layer_id"] for item in layers_payload["layers"]} == {
+        "ch-base",
+        "ch-curated",
+        "ch-stacked",
+    }
+
+    lineage_res = await server.call_tool("get_layer_lineage", {"layer_id": "ch-stacked"})
+    lineage_payload = json.loads(lineage_res.content[0].text)  # type: ignore[union-attr]
+    assert "ch-base" in lineage_payload["ancestors"]
+    assert "ch-curated" in lineage_payload["ancestors"]
+
+    analytics_res = await server.call_tool(
+        "analyze_graph",
+        {"layer_id": "ch-curated", "metric": "pagerank", "top_k": 5, "include_communities": True},
+    )
+    analytics_payload = json.loads(analytics_res.content[0].text)  # type: ignore[union-attr]
+    assert analytics_payload["node_count"] > 0
+    assert len(analytics_payload["central_nodes"]) > 0
+    assert analytics_payload["community_count"] >= 1
+
+    with pytest.raises(ToolError, match="Unsupported centrality metric"):
+        await server.call_tool(
+            "analyze_graph",
+            {"layer_id": "ch-curated", "metric": "eigenvalue"},
+        )
 
     # 10. Path traversal & validation errors must fail inside MCP server with actionable ToolError
     with pytest.raises(ToolError, match="escapes"):
@@ -257,4 +294,4 @@ async def test_mcp_stdio_subprocess_initialize_and_list_tools(tmp_path: Path) ->
         init = await session.initialize()
         assert init.server_info.name == "knowledgereduce"
         tools_res = await session.list_tools()
-        assert len(tools_res.tools) == 11
+        assert len(tools_res.tools) == 14

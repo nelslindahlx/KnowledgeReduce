@@ -7,7 +7,7 @@ import inspect
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar, cast
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -18,6 +18,7 @@ from knowledgereduce.export import (
     export_gexf,
     export_graphml,
     export_layer_json,
+    export_layer_markdown,
     export_layer_sharded,
 )
 from knowledgereduce.ingest import (
@@ -41,11 +42,17 @@ from knowledgereduce.models import (
     StorageError,
 )
 from knowledgereduce.pipeline import PipelineConfig, PipelineRunner
-from knowledgereduce.query import HybridGraphRAGRetriever, QueryBuilder
+from knowledgereduce.query import (
+    HybridGraphRAGRetriever,
+    QueryBuilder,
+    bounded_shortest_path,
+    central_nodes,
+    detect_communities,
+)
 from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, adjudicate_conflict
 from knowledgereduce.security import ResolverFn, ensure_within_base
 from knowledgereduce.stack import StackManager
-from knowledgereduce.storage import DuckDBParquetStore
+from knowledgereduce.storage import DuckDBParquetStore, GraphStore, layer_data_to_networkx
 
 _FnT = TypeVar("_FnT", bound=Callable[..., Any])
 
@@ -71,6 +78,137 @@ def _mcp_error_boundary(fn: _FnT) -> _FnT:
             raise ToolError(str(exc)) from exc
 
     return _sync_wrapper  # type: ignore[return-value]
+
+
+_VALID_METRICS = frozenset({"pagerank", "degree", "betweenness"})
+
+
+def build_layers_payload(store: GraphStore) -> dict[str, Any]:
+    """Return a serialized summary of all stored layers in chronological order."""
+    layers = store.list_layers()
+    return {
+        "count": len(layers),
+        "layers": [layer.model_dump(mode="json") for layer in layers],
+    }
+
+
+def build_layer_lineage_payload(stack_mgr: StackManager, layer_id: str) -> dict[str, Any]:
+    """Return direct parents, ancestors, descendants, and lineage edges for *layer_id*."""
+    ancestors = stack_mgr.get_ancestors(layer_id)
+    descendants = stack_mgr.get_descendants(layer_id)
+    layer_data = stack_mgr.store.load_layer(layer_id)
+    dag = stack_mgr.build_lineage_graph()
+    relevant = {layer_id, *ancestors, *descendants}
+    lineage_edges = sorted(
+        (
+            {"parent": str(src), "child": str(dst)}
+            for src, dst in dag.edges()
+            if str(src) in relevant and str(dst) in relevant
+        ),
+        key=lambda item: (item["parent"], item["child"]),
+    )
+    return {
+        "layer_id": layer_id,
+        "layer": layer_data.layer.model_dump(mode="json"),
+        "parents": list(layer_data.layer.parent_layer_ids),
+        "ancestors": ancestors,
+        "descendants": descendants,
+        "lineage_edges": lineage_edges,
+    }
+
+
+def build_graph_analytics_payload(
+    store: GraphStore,
+    layer_id: str,
+    *,
+    metric: str = "pagerank",
+    top_k: int = 10,
+    include_communities: bool = True,
+    path_source_id: str | None = None,
+    path_target_id: str | None = None,
+    max_hops: int = 6,
+) -> dict[str, Any]:
+    """Compute node centrality, Louvain communities, and optional shortest path."""
+    norm_metric = metric.strip().lower()
+    if norm_metric not in _VALID_METRICS:
+        raise KnowledgeReduceError(
+            f"Unsupported centrality metric {metric!r}. Choose pagerank, degree, or betweenness."
+        )
+    if top_k < 1:
+        raise KnowledgeReduceError(f"top_k must be >= 1 (got {top_k}).")
+    if max_hops < 0:
+        raise KnowledgeReduceError(f"max_hops must be >= 0 (got {max_hops}).")
+    if (path_source_id is None) != (path_target_id is None):
+        raise KnowledgeReduceError(
+            "Provide both path_source_id and path_target_id when computing a shortest path."
+        )
+
+    layer_data = store.load_layer(layer_id)
+    graph = layer_data_to_networkx(layer_data)
+    entity_map = {e.entity_id: e for e in layer_data.entities}
+    claim_map = {c.claim_id: c for c in layer_data.claims}
+
+    def _describe_node(node_id: str) -> dict[str, str]:
+        if node_id in entity_map:
+            ent = entity_map[node_id]
+            return {
+                "node_id": node_id,
+                "node_kind": "entity",
+                "label": ent.canonical_name,
+                "entity_type": ent.entity_type,
+            }
+        if node_id in claim_map:
+            clm = claim_map[node_id]
+            return {
+                "node_id": node_id,
+                "node_kind": "claim",
+                "label": clm.statement,
+            }
+        return {"node_id": node_id, "node_kind": "unknown", "label": node_id}
+
+    metric_lit = cast(Literal["pagerank", "degree", "betweenness"], norm_metric)
+    ranked = central_nodes(graph, metric=metric_lit, top_k=top_k)
+    central_entries = [{**_describe_node(nid), "score": round(score, 6)} for nid, score in ranked]
+
+    if include_communities:
+        raw_comms = detect_communities(graph)
+        communities = [
+            {
+                "size": len(comm),
+                "member_ids": comm,
+                "sample_labels": [_describe_node(nid)["label"] for nid in comm[:5]],
+            }
+            for comm in raw_comms
+        ]
+    else:
+        communities = []
+
+    shortest_path_payload: dict[str, Any] | None = None
+    if path_source_id is not None and path_target_id is not None:
+        path = bounded_shortest_path(
+            graph,
+            path_source_id,
+            path_target_id,
+            max_hops=max_hops,
+        )
+        shortest_path_payload = {
+            "source_id": path_source_id,
+            "target_id": path_target_id,
+            "found": path is not None,
+            "hops": (len(path) - 1) if path is not None else None,
+            "nodes": [_describe_node(nid) for nid in path] if path is not None else [],
+        }
+
+    return {
+        "layer_id": layer_id,
+        "metric": norm_metric,
+        "node_count": graph.number_of_nodes(),
+        "edge_count": graph.number_of_edges(),
+        "central_nodes": central_entries,
+        "community_count": len(communities),
+        "communities": communities,
+        "shortest_path": shortest_path_payload,
+    }
 
 
 def create_mcp_server(
@@ -360,7 +498,7 @@ def create_mcp_server(
         shard_size: int = 100,
         overwrite: bool = False,
     ) -> dict[str, Any]:
-        """Export *layer_id* to json, sharded_jsonl, graphml, gexf, or parquet inside workspace."""
+        """Export *layer_id* to json, sharded_jsonl, graphml, gexf, markdown, or parquet inside workspace."""
         layer_data = store.load_layer(layer_id)
         fmt = format.strip().lower()
         if fmt == "json":
@@ -377,6 +515,8 @@ def create_mcp_server(
             out = export_graphml(layer_data, output_path, base_dir=base)
         elif fmt == "gexf":
             out = export_gexf(layer_data, output_path, base_dir=base)
+        elif fmt == "markdown":
+            out = export_layer_markdown(layer_data, output_path, base_dir=base)
         elif fmt == "parquet":
             out = ensure_within_base(output_path, base)
             src_dir = ensure_within_base(layer_id, resolved_store_dir / "layers")
@@ -388,7 +528,7 @@ def create_mcp_server(
         else:
             raise StorageError(
                 f"Unsupported export format {format!r}. "
-                "Choose json, sharded_jsonl, graphml, gexf, or parquet."
+                "Choose json, sharded_jsonl, graphml, gexf, markdown, or parquet."
             )
         return {
             "layer_id": layer_id,
@@ -402,5 +542,40 @@ def create_mcp_server(
         """Run integrity validation and compute graph telemetry for *layer_id*."""
         layer_data = store.load_layer(layer_id)
         return validator.validate(layer_data, strict=False).model_dump(mode="json")
+
+    @server.tool()
+    @_mcp_error_boundary
+    def list_layers() -> dict[str, Any]:
+        """List all persisted knowledge layers and metadata in the workspace store."""
+        return build_layers_payload(store)
+
+    @server.tool()
+    @_mcp_error_boundary
+    def get_layer_lineage(layer_id: str) -> dict[str, Any]:
+        """Inspect parent, ancestor, and descendant layer lineage for *layer_id*."""
+        return build_layer_lineage_payload(stack_mgr, layer_id)
+
+    @server.tool()
+    @_mcp_error_boundary
+    def analyze_graph(
+        layer_id: str,
+        metric: str = "pagerank",
+        top_k: int = 10,
+        include_communities: bool = True,
+        path_source_id: str | None = None,
+        path_target_id: str | None = None,
+        max_hops: int = 6,
+    ) -> dict[str, Any]:
+        """Run graph centrality, Louvain community detection, and optional shortest path."""
+        return build_graph_analytics_payload(
+            store,
+            layer_id,
+            metric=metric,
+            top_k=top_k,
+            include_communities=include_communities,
+            path_source_id=path_source_id,
+            path_target_id=path_target_id,
+            max_hops=max_hops,
+        )
 
     return server
