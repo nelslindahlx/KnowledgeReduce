@@ -14,6 +14,7 @@ from knowledgereduce.map import (
     StructuredMapper,
     split_sentences,
 )
+from knowledgereduce.map.nlp import _ANCHORED_VERB_MAP
 from knowledgereduce.models import (
     Claim,
     ConflictStrategy,
@@ -30,6 +31,7 @@ from knowledgereduce.models import (
     SourceType,
 )
 from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, resolve_claim_conflicts
+from knowledgereduce.reduce.conflicts import is_functional_predicate
 from knowledgereduce.resolve import TfidfSVDProvider, cluster_claims, resolve_entities_and_remap
 
 
@@ -501,3 +503,104 @@ def test_integrity_validator_catches_dangling_references_and_reducer_prevents_th
     assert report.valid is True
     assert reduced.layer.stats["open_conflicts"] == 1
     assert any(r.relation_type == "CONTRADICTS" for r in reduced.relations)
+
+
+def test_split_sentences_preserves_apa_bibliography_entries() -> None:
+    text = (
+        "Introductory sentence precedes references.\n"
+        "Carlsen, C. J., Lindahl, N., & Lindahl, S. (2004). "
+        "Civic honors program at Johnson County Community College. "
+        "Journal for Civic Commitment, 4, 1-9.\n"
+        "Closing sentence follows cleanly."
+    )
+    sents = split_sentences(text)
+    assert len(sents) == 3
+    assert sents[1][0].startswith("Carlsen, C. J., Lindahl, N., & Lindahl, S. (2004).")
+    assert sents[1][0].endswith("Journal for Civic Commitment, 4, 1-9.")
+
+
+def test_deterministic_mapper_mid_initial_gpe_org_and_heading_suppression() -> None:
+    doc = SourceDocument(
+        source_id="src-ner-v12",
+        uri="https://civichonors.com/p/the-book",
+        source_type=SourceType.WEB,
+        title="The Book - Civic Honors",
+        content=(
+            "Chapter 10: Never Fear Collaboration\n"
+            "Building Connections in the Community\n"
+            "Dr. Charles J. Carlsen led Johnson County Community College and submitted to "
+            "Journal for Civic Commitment via Prentice Hall (Upper Saddle River, NJ) and New York.\n"
+            "Deborah DeGrate, Carrie Donham, Chris Engle, and Jennifer Pittman-Leeper graduated "
+            "in Lawrence, Kansas while reading Bowling Alone."
+        ),
+        trust_weight=0.9,
+    )
+    batch = DeterministicNLPMapper(min_sentence_length=20).map_document(doc)
+    by_name: dict[str, list[Entity]] = {}
+    for ent in batch.entities:
+        by_name.setdefault(ent.canonical_name, []).append(ent)
+
+    assert "Never Fear Collaboration" not in by_name
+    assert "Building Connections" not in by_name
+
+    assert by_name["Charles J. Carlsen"][0].entity_type == "PERSON"
+    assert "Dr. Charles J. Carlsen" in by_name["Charles J. Carlsen"][0].aliases
+    assert by_name["Johnson County Community College"][0].entity_type == "ORG"
+    assert by_name["Journal for Civic Commitment"][0].entity_type == "ORG"
+    assert by_name["Prentice Hall"][0].entity_type == "ORG"
+
+    assert len(by_name["New York"]) == 1
+    assert by_name["New York"][0].entity_type == "GPE"
+    assert by_name["Upper Saddle River"][0].entity_type == "GPE"
+    assert by_name["Lawrence"][0].entity_type == "GPE"
+    assert by_name["Kansas"][0].entity_type == "GPE"
+
+    for student in ("Deborah DeGrate", "Carrie Donham", "Chris Engle", "Jennifer Pittman-Leeper"):
+        assert by_name[student][0].entity_type == "PERSON"
+    assert by_name["Bowling Alone"][0].entity_type == "CONCEPT"
+
+
+def test_deterministic_mapper_two_pass_linking_and_nonfunctional_triples() -> None:
+    doc = SourceDocument(
+        source_id="src-link-v12",
+        uri="https://civichonors.com/p/the-book",
+        source_type=SourceType.WEB,
+        title="The Book - Civic Honors",
+        content=(
+            "This book was published in 2006.\n"
+            "Dr. H. George Frederickson taught Concepts of Civil Society.\n"
+            "The Civic Honors Program develops active citizen leaders.\n"
+            "Later Dr. Frederickson showed the civic honors program facilitates community growth.\n"
+            "Moreover, the program strengthens civic engagement across campuses."
+        ),
+        trust_weight=0.85,
+    )
+    batch = DeterministicNLPMapper(min_sentence_length=20).map_document(doc)
+    reduced = KnowledgeReducer(conflict_strategy=ConflictStrategy.PRESERVE_DISPUTE).reduce_batches(
+        [batch], layer_id="v12-map-test", layer_name="v12 Map Test"
+    )
+
+    assert reduced.conflicts == []
+    claims_by_text = {c.statement: c for c in reduced.claims}
+    pub_claim = claims_by_text["This book was published in 2006."]
+    assert pub_claim.predicate == "PUBLISHED_IN"
+    assert pub_claim.object_literal == "2006"
+    assert pub_claim.subject_id is not None
+
+    fred_sent = next(c for stmt, c in claims_by_text.items() if "Later Dr. Frederickson" in stmt)
+    fred_mentions = {
+        r.target_id
+        for r in reduced.relations
+        if r.source_id == fred_sent.claim_id and r.relation_type == "MENTIONS"
+    }
+    ent_by_id = {e.entity_id: e for e in reduced.entities}
+    mentioned_names = {ent_by_id[eid].canonical_name for eid in fred_mentions}
+    assert "H. George Frederickson" in mentioned_names
+    assert "Civic Honors Program" in mentioned_names
+
+    prog_sent = next(c for stmt, c in claims_by_text.items() if "Moreover" in stmt)
+    assert prog_sent.predicate == "STRENGTHENS"
+    assert prog_sent.subject_id is not None
+    assert prog_sent.object_id is not None
+    assert any(r.relation_type == "STRENGTHENS" for r in reduced.relations)
+    assert all(not is_functional_predicate(pred) for pred in _ANCHORED_VERB_MAP.values())
