@@ -309,3 +309,51 @@ def test_hybrid_graphrag_idf_and_provenance_context_ranks_rare_factual_claims_fi
     assert len(ctx.results) == 3
     assert ctx.results[0].claim.claim_id == "clm_pub_2006"
     assert "clm_unrelated_same_title" not in {r.claim.claim_id for r in ctx.results}
+
+
+def test_hybrid_graphrag_debias_structural_heading_against_factual_answer(
+    tmp_path: Path,
+) -> None:
+    duck = DuckDBParquetStore(tmp_path)
+    claims = [
+        Claim(
+            claim_id="clm_heading_story",
+            statement="The Story Behind Graduation With Civic Honors",
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.80,
+            evidence=[
+                Evidence(
+                    source_id="src_book",
+                    excerpt="The Story Behind Graduation With Civic Honors",
+                )
+            ],
+        ),
+        Claim(
+            claim_id="clm_fact_ku",
+            statement=(
+                "The story behind graduation with civic honors began in an academic setting "
+                "during the spring semester of 2002 at the University of Kansas."
+            ),
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.80,
+            evidence=[
+                Evidence(
+                    source_id="src_book",
+                    excerpt="began in an academic setting during the spring semester of 2002",
+                )
+            ],
+        ),
+    ]
+    duck.save_layer(
+        LayerData(
+            layer=KnowledgeLayer(layer_id="book-heading", name="Heading De-bias"),
+            claims=claims,
+        )
+    )
+    ctx = HybridGraphRAGRetriever(duck).retrieve(
+        "book-heading",
+        "When and where did the story behind graduation with civic honors begin?",
+        top_k=2,
+        hops=0,
+    )
+    assert [r.claim.claim_id for r in ctx.results] == ["clm_fact_ku", "clm_heading_story"]
