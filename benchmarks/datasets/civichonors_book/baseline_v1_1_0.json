@@ -1,0 +1,157 @@
+{
+  "baseline_version": "1.1.0",
+  "corpus_id": "civichonors-book-v1",
+  "source_url": "https://www.civichonors.com/p/the-book",
+  "metrics": {
+    "corpus_id": "civichonors-book-v1",
+    "mapper": "deterministic",
+    "min_sentence_length": 25,
+    "source_chars": 139596,
+    "source_words": 21765,
+    "content_sha256": "309bf753af49c77b6dc033c05cfd689bb337511cf4f3329c84835cd9b8017d4f",
+    "valid": true,
+    "validation_errors": 0,
+    "validation_warnings": 0,
+    "entities": 109,
+    "claims_before": 1067,
+    "claims_after": 1040,
+    "compression_ratio": 0.0253,
+    "relations": 183,
+    "mentions_relations": 147,
+    "co_occurs_relations": 36,
+    "semantic_relations": 0,
+    "isolated_nodes": 942,
+    "isolated_node_ratio": 0.8198,
+    "connected_components": 1005,
+    "edge_density": 0.000139,
+    "claim_connectivity_rate": 0.0942,
+    "grounded_triple_rate": 0.0,
+    "mean_quality_score": 57.05,
+    "core_entity_name_recall": 0.9722,
+    "core_entity_typed_recall": 0.7222,
+    "core_entity_type_accuracy": 0.7429,
+    "alias_merge_recall": 0.8,
+    "cross_type_duplicate_count": 1,
+    "heading_noise_fp_count": 12,
+    "heading_noise_fp_rate": 1.0,
+    "core_fact_retention": 0.9167,
+    "retrieval_hit_at_1": 0.8,
+    "retrieval_hit_at_3": 0.8,
+    "retrieval_hit_at_5": 0.9,
+    "retrieval_mrr_at_5": 0.825,
+    "query_ranks": {
+      "pub_year": null,
+      "online_date": 4,
+      "origin_ku": 1,
+      "civil_society_prof": 1,
+      "ku_advisors": 1,
+      "jccc_president": 1,
+      "journal_2004": 1,
+      "first_graduates": 1,
+      "putnam_work": 1,
+      "volunteer_recognition": 1
+    },
+    "missing_core_entities": [
+      "Charles J. Carlsen"
+    ],
+    "mistyped_core_entities": [
+      {
+        "canonical_name": "Bowling Alone",
+        "expected_type": "CONCEPT",
+        "predicted_types": [
+          "PERSON"
+        ]
+      },
+      {
+        "canonical_name": "Carrie Donham",
+        "expected_type": "PERSON",
+        "predicted_types": [
+          "GPE"
+        ]
+      },
+      {
+        "canonical_name": "Chris Engle",
+        "expected_type": "PERSON",
+        "predicted_types": [
+          "GPE"
+        ]
+      },
+      {
+        "canonical_name": "Deborah DeGrate",
+        "expected_type": "PERSON",
+        "predicted_types": [
+          "CONCEPT"
+        ]
+      },
+      {
+        "canonical_name": "Jennifer Pittman-Leeper",
+        "expected_type": "PERSON",
+        "predicted_types": [
+          "CONCEPT"
+        ]
+      },
+      {
+        "canonical_name": "Johnson County Community College",
+        "expected_type": "ORG",
+        "predicted_types": [
+          "CONCEPT"
+        ]
+      },
+      {
+        "canonical_name": "Journal for Civic Commitment",
+        "expected_type": "ORG",
+        "predicted_types": [
+          "CONCEPT"
+        ]
+      },
+      {
+        "canonical_name": "Prentice Hall",
+        "expected_type": "ORG",
+        "predicted_types": [
+          "PERSON"
+        ]
+      },
+      {
+        "canonical_name": "San Francisco",
+        "expected_type": "GPE",
+        "predicted_types": [
+          "PERSON"
+        ]
+      }
+    ],
+    "cross_type_duplicate_names": [
+      "new york"
+    ],
+    "missing_reference_facts": [
+      "carlsen_lindahl_ref"
+    ],
+    "map_seconds": 0.13,
+    "reduce_seconds": 1.526,
+    "validate_seconds": 0.044,
+    "store_seconds": 0.085,
+    "query_cold_seconds": 0.614,
+    "query_warm_avg_seconds": 0.274,
+    "total_seconds": 2.4,
+    "peak_traced_mib": 37.87
+  },
+  "regression_floors": {
+    "min": {
+      "core_entity_name_recall": 0.95,
+      "core_entity_typed_recall": 0.7,
+      "core_entity_type_accuracy": 0.72,
+      "alias_merge_recall": 0.8,
+      "core_fact_retention": 0.9,
+      "retrieval_hit_at_1": 0.75,
+      "retrieval_hit_at_5": 0.85,
+      "retrieval_mrr_at_5": 0.75,
+      "claim_connectivity_rate": 0.08,
+      "mean_quality_score": 55.0
+    },
+    "max": {
+      "cross_type_duplicate_count": 1,
+      "heading_noise_fp_count": 12,
+      "isolated_node_ratio": 0.85,
+      "total_seconds": 30.0
+    }
+  }
+}

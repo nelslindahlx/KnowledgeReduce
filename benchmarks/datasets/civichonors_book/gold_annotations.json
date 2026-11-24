@@ -1,0 +1,325 @@
+{
+  "corpus_id": "civichonors-book-v1",
+  "source_url": "https://www.civichonors.com/p/the-book",
+  "content_sha256": "309bf753af49c77b6dc033c05cfd689bb337511cf4f3329c84835cd9b8017d4f",
+  "expected_entities": [
+    {
+      "canonical_name": "Nels Lindahl",
+      "expected_type": "PERSON",
+      "expected_aliases": ["Dr. Nels Lindahl"]
+    },
+    {
+      "canonical_name": "H. George Frederickson",
+      "expected_type": "PERSON",
+      "expected_aliases": ["Dr. H. George Frederickson"]
+    },
+    {
+      "canonical_name": "Raymond Davis",
+      "expected_type": "PERSON",
+      "expected_aliases": ["Dr. Raymond Davis"]
+    },
+    {
+      "canonical_name": "Thomas Longoria",
+      "expected_type": "PERSON",
+      "expected_aliases": ["Dr. Thomas Longoria"]
+    },
+    {
+      "canonical_name": "Charles J. Carlsen",
+      "expected_type": "PERSON",
+      "expected_aliases": ["Dr. Charles J. Carlsen"]
+    },
+    {
+      "canonical_name": "Susan Lindahl",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Deborah DeGrate",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Carrie Donham",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Chris Engle",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Jennifer Pittman-Leeper",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Robert Putnam",
+      "expected_type": "PERSON",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "University of Kansas",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Johnson County Community College",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Public Administration Department",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Civic Honors Program",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Journal for Civic Commitment",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Harvard University Press",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Oxford University Press",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Cambridge University Press",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "University of California Press",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Brookings Institution Press",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Russell Sage Foundation",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Prentice Hall",
+      "expected_type": "ORG",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Denver",
+      "expected_type": "GPE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Colorado",
+      "expected_type": "GPE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "New York",
+      "expected_type": "GPE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "London",
+      "expected_type": "GPE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "San Francisco",
+      "expected_type": "GPE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Civic Honors",
+      "expected_type": "CONCEPT",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Concepts of Civil Society",
+      "expected_type": "CONCEPT",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "Bowling Alone",
+      "expected_type": "CONCEPT",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "2002",
+      "expected_type": "DATE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "2004",
+      "expected_type": "DATE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "2005",
+      "expected_type": "DATE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "2006",
+      "expected_type": "DATE",
+      "expected_aliases": []
+    },
+    {
+      "canonical_name": "June 14, 2020",
+      "expected_type": "DATE",
+      "expected_aliases": []
+    }
+  ],
+  "known_heading_noise_entities": [
+    "Breaking Down",
+    "Building Connections",
+    "Never Fear Collaboration",
+    "Positive Message",
+    "Strong Leadership",
+    "Thinking About What",
+    "Measuring Change",
+    "Story Behind Graduation With",
+    "Advantage of Having Long-Term Vision",
+    "Future of E-Community",
+    "Thinking About Technology",
+    "Individual Change"
+  ],
+  "reference_facts": [
+    {
+      "fact_id": "book_pub_2006",
+      "description": "Original publication year of the Civic Honors book.",
+      "required_substrings": ["published in 2006"]
+    },
+    {
+      "fact_id": "author_denver_2020",
+      "description": "Online edition attribution line with author, date, and location.",
+      "required_substrings": ["Nels Lindahl", "June 14, 2020", "Denver, Colorado"]
+    },
+    {
+      "fact_id": "ku_spring_2002",
+      "description": "Origin of graduation with civic honors in spring 2002 at University of Kansas.",
+      "required_substrings": ["spring semester of 2002", "University of Kansas"]
+    },
+    {
+      "fact_id": "frederickson_class",
+      "description": "Concepts of Civil Society course taught by Dr. H. George Frederickson.",
+      "required_substrings": ["H. George Frederickson", "Concepts of Civil Society"]
+    },
+    {
+      "fact_id": "davis_longoria",
+      "description": "Graduate guidance and collaboration mentorship from Dr. Raymond Davis and Dr. Thomas Longoria.",
+      "required_substrings": ["Raymond Davis", "Thomas Longoria"]
+    },
+    {
+      "fact_id": "carlsen_jccc",
+      "description": "JCCC president Dr. Charles J. Carlsen learning about Civic Honors from Susan Lindahl.",
+      "required_substrings": ["Charles J. Carlsen", "Johnson County Community College", "Susan Lindahl"]
+    },
+    {
+      "fact_id": "jccc_pilot_2004",
+      "description": "2004 JCCC graduation with civic honors pilot program.",
+      "required_substrings": ["2004", "Johnson County Community College", "pilot program"]
+    },
+    {
+      "fact_id": "journal_citation_2004",
+      "description": "Article submission to Journal for Civic Commitment.",
+      "required_substrings": ["Journal for Civic Commitment", "Civic Honors Program at Johnson County Community College"]
+    },
+    {
+      "fact_id": "first_four_grads_2005",
+      "description": "First four JCCC students to graduate with civic honors in May 2005.",
+      "required_substrings": ["May 2005", "Deborah DeGrate", "Carrie Donham", "Chris Engle", "Jennifer Pittman-Leeper"]
+    },
+    {
+      "fact_id": "putnam_bowling_alone",
+      "description": "Citation of Robert Putnam's Bowling Alone (2000) on civic participation.",
+      "required_substrings": ["Robert Putnam", "2000", "Bowling Alone"]
+    },
+    {
+      "fact_id": "volunteer_title_reward",
+      "description": "Recognition and reward of participating student volunteers with the Civic Honors title.",
+      "required_substrings": ["student volunteers", "recognized and rewarded", "Civic Honors"]
+    },
+    {
+      "fact_id": "carlsen_lindahl_ref",
+      "description": "APA reference entry for Carlsen, Lindahl, & Lindahl (2004).",
+      "required_substrings": ["Carlsen, C. J., Lindahl, N., & Lindahl, S. (2004)"]
+    }
+  ],
+  "retrieval_queries": [
+    {
+      "query_id": "pub_year",
+      "category": "publication",
+      "query": "When was the Civic Honors book published?",
+      "required_evidence_substrings": ["published in 2006"]
+    },
+    {
+      "query_id": "online_date",
+      "category": "provenance",
+      "query": "Where and when did Dr. Nels Lindahl date the online edition?",
+      "required_evidence_substrings": ["June 14, 2020", "Denver, Colorado"]
+    },
+    {
+      "query_id": "origin_ku",
+      "category": "history",
+      "query": "When and where did the story behind graduation with civic honors begin?",
+      "required_evidence_substrings": ["spring semester of 2002", "University of Kansas"]
+    },
+    {
+      "query_id": "civil_society_prof",
+      "category": "people",
+      "query": "Who taught Concepts of Civil Society at University of Kansas?",
+      "required_evidence_substrings": ["H. George Frederickson", "Concepts of Civil Society"]
+    },
+    {
+      "query_id": "ku_advisors",
+      "category": "people",
+      "query": "Who did the author thank for advice, guidance, and defining collaboration?",
+      "required_evidence_substrings": ["Raymond Davis", "Thomas Longoria"]
+    },
+    {
+      "query_id": "jccc_president",
+      "category": "institution",
+      "query": "Who was the president of Johnson County Community College who learned of the idea from Susan Lindahl?",
+      "required_evidence_substrings": ["Charles J. Carlsen", "Johnson County Community College", "Susan Lindahl"]
+    },
+    {
+      "query_id": "journal_2004",
+      "category": "publication",
+      "query": "What article was submitted to the Journal for Civic Commitment in 2004?",
+      "required_evidence_substrings": ["Journal for Civic Commitment", "Civic Honors Program at Johnson County Community College"]
+    },
+    {
+      "query_id": "first_graduates",
+      "category": "people",
+      "query": "Who were the first four students to graduate with civic honors in May 2005?",
+      "required_evidence_substrings": ["Deborah DeGrate", "Carrie Donham", "Chris Engle", "Jennifer Pittman-Leeper"]
+    },
+    {
+      "query_id": "putnam_work",
+      "category": "literature",
+      "query": "Which work by Robert Putnam brought civic participation to the forefront of the public mind?",
+      "required_evidence_substrings": ["Robert Putnam", "Bowling Alone"]
+    },
+    {
+      "query_id": "volunteer_recognition",
+      "category": "program",
+      "query": "How are student volunteers recognized and rewarded in the Civic Honors program?",
+      "required_evidence_substrings": ["student volunteers", "recognized and rewarded", "Civic Honors"]
+    }
+  ]
+}

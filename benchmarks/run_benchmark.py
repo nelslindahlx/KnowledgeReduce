@@ -11,6 +11,7 @@ import tracemalloc
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from knowledgereduce.map import DeterministicNLPMapper
 from knowledgereduce.models import (
@@ -27,6 +28,19 @@ from knowledgereduce.models import (
 from knowledgereduce.query import HybridGraphRAGRetriever
 from knowledgereduce.reduce import KnowledgeReducer
 from knowledgereduce.storage import DuckDBParquetStore
+
+try:
+    from benchmarks.civichonors_book_benchmark import (
+        compare_against_baseline,
+        evaluate_civichonors_book,
+        load_baseline,
+    )
+except ModuleNotFoundError:
+    from civichonors_book_benchmark import (  # type: ignore[no-redef]
+        compare_against_baseline,
+        evaluate_civichonors_book,
+        load_baseline,
+    )
 
 
 @dataclass(frozen=True)
@@ -510,15 +524,32 @@ def main() -> int:
         default=[1000, 10000],
         help="Fact counts for scaling benchmark.",
     )
+    parser.add_argument(
+        "--skip-book",
+        action="store_true",
+        help="Skip the real-world Civic Honors book golden evaluation.",
+    )
     args = parser.parse_args()
 
     golden = run_golden_evaluation()
     scaling = [run_scaling_benchmark(n) for n in args.scale]
 
-    report = {
+    report: dict[str, Any] = {
         "golden_50_docs": golden.__dict__,
         "scaling": scaling,
     }
+
+    book_comparison: dict[str, Any] | None = None
+    book_valid = True
+    if not args.skip_book:
+        book_result = evaluate_civichonors_book()
+        book_valid = book_result.validation_valid
+        book_comparison = compare_against_baseline(book_result.metrics, load_baseline())
+        report["civichonors_book_golden"] = {
+            "metrics": book_result.metrics.to_dict(),
+            "baseline_comparison": book_comparison,
+        }
+
     print(json.dumps(report, indent=2))
 
     # Enforce benchmark quality & latency SLAs
@@ -529,6 +560,11 @@ def main() -> int:
     assert golden.conflict_detection_recall >= 0.80, (
         f"Conflict recall below 0.80: {golden.conflict_detection_recall}"
     )
+    if book_comparison is not None:
+        assert book_valid, "Civic Honors book golden layer failed strict integrity validation."
+        assert book_comparison["passed_floors"], (
+            f"Civic Honors book regression floors failed: {book_comparison['floor_failures']}"
+        )
     for row in scaling:
         if int(row["input_facts"]) <= 10000:
             assert float(row["total_seconds"]) < 60.0, f"10K scaling SLA exceeded: {row}"
