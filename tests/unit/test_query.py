@@ -29,6 +29,7 @@ from knowledgereduce.query import (
 )
 from knowledgereduce.resolve import TfidfSVDProvider
 from knowledgereduce.storage import DuckDBParquetStore, MemoryGraphStore
+from knowledgereduce.storage.base import tokenize_search_query
 
 
 def _seed_query_store() -> MemoryGraphStore:
@@ -227,3 +228,84 @@ def test_hybrid_graphrag_persists_index_in_duckdb_and_supports_tfidf_fallback(
     assert tfidf_retriever.build_index("q1") == 0
     ctx_tfidf = tfidf_retriever.retrieve("q1", "University of Kansas", top_k=1, hops=1)
     assert [r.claim.claim_id for r in ctx_tfidf.results] == ["c2"]
+
+
+def test_tokenize_search_query_filters_stop_words_with_fallback() -> None:
+    assert tokenize_search_query("When was the Civic Honors book published?") == [
+        "civic",
+        "honors",
+        "book",
+        "published",
+    ]
+    assert tokenize_search_query("to be or") == ["to", "be", "or"]
+    assert tokenize_search_query("to be or", max_tokens=2) == ["to", "be"]
+    assert tokenize_search_query("when is it", max_tokens=0) == []
+
+
+def test_hybrid_graphrag_idf_and_provenance_context_ranks_rare_factual_claims_first(
+    tmp_path: Path,
+) -> None:
+    duck = DuckDBParquetStore(tmp_path)
+    claims = [
+        Claim(
+            claim_id=f"clm_boiler_{idx}",
+            statement="The Civic Honors program supports community leadership every semester.",
+            source_id="src_book",
+            source_title="The Book - Civic Honors",
+            author_creator="Dr. Nels Lindahl",
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.75,
+            evidence=[Evidence(source_id="src_book", excerpt="Civic Honors program")],
+        )
+        for idx in range(12)
+    ]
+    claims.extend(
+        [
+            Claim(
+                claim_id="clm_heading",
+                statement="Civic Honors Book Overview",
+                source_id="src_book",
+                source_title="The Book - Civic Honors",
+                author_creator="Dr. Nels Lindahl",
+                reliability=ReliabilityRating.LIKELY_TRUE,
+                confidence=0.75,
+                evidence=[Evidence(source_id="src_book", excerpt="Civic Honors Book Overview")],
+            ),
+            Claim(
+                claim_id="clm_unrelated_same_title",
+                statement="Unrelated administrative notes without matching terms.",
+                source_id="src_book",
+                source_title="The Book - Civic Honors",
+                author_creator="Dr. Nels Lindahl",
+                reliability=ReliabilityRating.VERIFIED,
+                confidence=0.95,
+                evidence=[Evidence(source_id="src_book", excerpt="Unrelated notes")],
+            ),
+            Claim(
+                claim_id="clm_pub_2006",
+                statement="This book was published in 2006.",
+                source_id="src_book",
+                source_title="The Book - Civic Honors",
+                author_creator="Dr. Nels Lindahl",
+                reliability=ReliabilityRating.LIKELY_TRUE,
+                confidence=0.80,
+                evidence=[
+                    Evidence(source_id="src_book", excerpt="This book was published in 2006.")
+                ],
+            ),
+        ]
+    )
+    duck.save_layer(
+        LayerData(
+            layer=KnowledgeLayer(layer_id="book-idf", name="Book IDF"),
+            claims=claims,
+        )
+    )
+
+    retriever = HybridGraphRAGRetriever(duck)
+    ctx = retriever.retrieve(
+        "book-idf", "When was the Civic Honors book published?", top_k=3, hops=0
+    )
+    assert len(ctx.results) == 3
+    assert ctx.results[0].claim.claim_id == "clm_pub_2006"
+    assert "clm_unrelated_same_title" not in {r.claim.claim_id for r in ctx.results}

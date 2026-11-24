@@ -22,19 +22,64 @@ from knowledgereduce.models import (
 )
 
 _SEARCH_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+_SEARCH_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "to",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+    }
+)
 
 
 def tokenize_search_query(query: str, *, max_tokens: int = 12) -> list[str]:
-    """Extract deduplicated lowercase alphanumeric search tokens from *query*."""
+    """Extract deduplicated lowercase content tokens from *query* (with stop-word fallback)."""
+    if max_tokens <= 0:
+        return []
     seen: set[str] = set()
-    tokens: list[str] = []
+    raw_tokens: list[str] = []
     for tok in _SEARCH_TOKEN_RE.findall(query.lower()):
         if tok not in seen:
             seen.add(tok)
-            tokens.append(tok)
-            if len(tokens) >= max_tokens:
-                break
-    return tokens
+            raw_tokens.append(tok)
+
+    content_tokens = [tok for tok in raw_tokens if tok not in _SEARCH_STOP_WORDS]
+    selected = content_tokens if content_tokens else raw_tokens
+    return selected[:max_tokens]
 
 
 def filter_matching_conflicts(

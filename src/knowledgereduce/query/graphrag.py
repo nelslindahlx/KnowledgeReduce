@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 import numpy as np
@@ -11,9 +12,34 @@ from rapidfuzz import fuzz
 from knowledgereduce.models import Claim, ConflictRecord, Entity, ReliabilityRating
 from knowledgereduce.query.analytics import k_hop_neighborhood
 from knowledgereduce.resolve.embeddings import EmbeddingProvider, HashingEmbeddingProvider
-from knowledgereduce.storage.base import GraphStore, filter_matching_conflicts
+from knowledgereduce.storage.base import (
+    _SEARCH_STOP_WORDS,
+    GraphStore,
+    filter_matching_conflicts,
+    tokenize_search_query,
+)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+_HEADING_PREFIX_RE = re.compile(r"^(?:Chapter|Section|Part|Appendix)\s*(?:\d+|[IVXLCDM]+)?[:\s]")
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _is_structural_heading(statement: str) -> bool:
+    stripped = statement.strip()
+    if not stripped or stripped[-1] in ".!?":
+        return False
+    if _HEADING_PREFIX_RE.match(stripped):
+        return True
+    if _DIGIT_RE.search(stripped):
+        return False
+    words = stripped.split()
+    if not (2 <= len(words) <= 10):
+        return False
+    content_words = [w for w in words if w.lower() not in _SEARCH_STOP_WORDS]
+    if not content_words:
+        return False
+    cap_count = sum(1 for w in content_words if w[0].isupper())
+    return (cap_count / len(content_words)) >= 0.70
 
 
 class RetrievedClaim(BaseModel):
@@ -147,18 +173,58 @@ class HybridGraphRAGRetriever:
                 sem_scores = [0.0] * len(candidates)
 
         q_low = query.strip().lower()
-        q_tokens = set(_TOKEN_RE.findall(q_low))
+        q_tokens_list = tokenize_search_query(query, max_tokens=24)
+        q_tokens = set(q_tokens_list)
+        q_fuzzy_str = " ".join(sorted(q_tokens)) if q_tokens else q_low
+
+        candidate_token_sets: list[set[str]] = []
+        df: dict[str, int] = dict.fromkeys(q_tokens, 0)
+        for clm in candidates:
+            s_toks = set(_TOKEN_RE.findall(clm.statement.lower()))
+            candidate_token_sets.append(s_toks)
+            for q_tok in q_tokens:
+                if q_tok in s_toks:
+                    df[q_tok] += 1
+
+        n_cands = len(candidates)
+        idf: dict[str, float] = {
+            tok: math.log((1.0 + n_cands) / (1.0 + count)) + 1.0 for tok, count in df.items()
+        }
+        total_q_idf = sum(idf.values())
+        wants_chapter = "chapter" in q_tokens
 
         scored: list[tuple[Claim, float, float, float]] = []
         for idx, clm in enumerate(candidates):
-            stmt_low = clm.statement.lower()
-            s_tokens = set(_TOKEN_RE.findall(stmt_low))
-            tok_overlap = len(q_tokens & s_tokens) / len(q_tokens) if q_tokens else 0.0
-            fuzzy_part = fuzz.token_set_ratio(q_low, stmt_low) / 100.0 if q_low else 0.0
-            lex = 0.6 * tok_overlap + 0.4 * fuzzy_part
+            s_tokens = candidate_token_sets[idx]
+            matched_stmt = q_tokens & s_tokens
+            idf_overlap = (
+                sum(idf[tok] for tok in matched_stmt) / total_q_idf if total_q_idf > 0 else 0.0
+            )
+
+            s_content = s_tokens - _SEARCH_STOP_WORDS
+            s_fuzzy_str = " ".join(sorted(s_content if s_content else s_tokens))
+            fuzzy_part = (
+                fuzz.token_set_ratio(q_fuzzy_str, s_fuzzy_str) / 100.0
+                if q_fuzzy_str and s_fuzzy_str
+                else 0.0
+            )
+
+            context_bonus = 0.0
+            unmatched_q = q_tokens - matched_stmt
+            if matched_stmt and unmatched_q and total_q_idf > 0:
+                provenance_text = f"{clm.source_title} {clm.author_creator or ''}".lower()
+                prov_tokens = set(_TOKEN_RE.findall(provenance_text))
+                prov_hits = unmatched_q & prov_tokens
+                if prov_hits:
+                    context_bonus = 0.20 * (sum(idf[tok] for tok in prov_hits) / total_q_idf)
+
+            lex = min(1.0, 0.65 * idf_overlap + 0.35 * fuzzy_part + context_bonus)
+            if not wants_chapter and _is_structural_heading(clm.statement):
+                lex *= 0.85
+
             sem = float(sem_scores[idx])
             qual = clm.quality_score / 100.0
-            total = round(0.45 * lex + 0.45 * sem + 0.10 * qual, 4)
+            total = round(0.55 * lex + 0.35 * sem + 0.10 * qual, 4)
             scored.append((clm, total, round(lex, 4), round(sem, 4)))
 
         scored.sort(key=lambda item: (-item[1], item[0].claim_id))
