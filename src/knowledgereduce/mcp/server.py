@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import ValidationError
 
 from knowledgereduce.export import (
     export_gexf,
@@ -54,14 +55,14 @@ _FnT = TypeVar("_FnT", bound=Callable[..., Any])
 
 
 def _mcp_error_boundary(fn: _FnT) -> _FnT:
-    """Translate domain errors to actionable MCP ``ToolError`` responses."""
+    """Translate domain and validation errors to actionable MCP ``ToolError`` responses."""
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await fn(*args, **kwargs)
-            except KnowledgeReduceError as exc:
+            except (KnowledgeReduceError, ValidationError, ValueError) as exc:
                 raise ToolError(str(exc)) from exc
 
         return _async_wrapper  # type: ignore[return-value]
@@ -70,7 +71,7 @@ def _mcp_error_boundary(fn: _FnT) -> _FnT:
     def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except KnowledgeReduceError as exc:
+        except (KnowledgeReduceError, ValidationError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
     return _sync_wrapper  # type: ignore[return-value]

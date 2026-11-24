@@ -151,3 +151,51 @@ def test_hybrid_graphrag_retriever_returns_neighbors_and_conflicts() -> None:
     assert len(ctx.results[0].graph_neighbors) == 2
     assert {e.entity_id for e in ctx.related_entities} == {"e1", "e2"}
     assert [cf.conflict_id for cf in ctx.conflicts] == ["cf1"]
+
+
+def test_hybrid_graphrag_induced_entity_edge_attribution() -> None:
+    store = MemoryGraphStore()
+    data = LayerData(
+        layer=KnowledgeLayer(layer_id="q_edge", name="Induced Edge Layer"),
+        entities=[
+            Entity(entity_id="e_ku", canonical_name="University of Kansas", entity_type="ORG"),
+            Entity(entity_id="e_law", canonical_name="Lawrence", entity_type="GPE"),
+        ],
+        claims=[
+            Claim(
+                claim_id="c_ku",
+                statement="The University of Kansas is located in Lawrence.",
+                reliability=ReliabilityRating.VERIFIED,
+                confidence=0.95,
+                evidence=[Evidence(source_id="s1", excerpt="located in Lawrence")],
+            )
+        ],
+        relations=[
+            Relation(
+                relation_id="r_m1", source_id="c_ku", target_id="e_ku", relation_type="MENTIONS"
+            ),
+            Relation(
+                relation_id="r_m2", source_id="c_ku", target_id="e_law", relation_type="MENTIONS"
+            ),
+            Relation(
+                relation_id="r_loc", source_id="e_ku", target_id="e_law", relation_type="LOCATED_IN"
+            ),
+        ],
+    )
+    store.save_layer(data)
+    ctx = HybridGraphRAGRetriever(store).retrieve(
+        "q_edge", "University of Kansas Lawrence", top_k=1, hops=1
+    )
+    assert len(ctx.results) == 1
+    neighbors = ctx.results[0].graph_neighbors
+    assert len(neighbors) == 3
+    loc_edges = [n for n in neighbors if n["relation_type"] == "LOCATED_IN"]
+    assert loc_edges == [
+        {
+            "node_id": "e_law",
+            "relation_type": "LOCATED_IN",
+            "label": "University of Kansas -> Lawrence",
+            "source_id": "e_ku",
+            "target_id": "e_law",
+        }
+    ]

@@ -87,6 +87,46 @@ def test_structured_mapper_and_spacy_missing_dependency() -> None:
         spacy_mapper.map_document(doc)
 
 
+def test_structured_mapper_preserves_per_row_entity_types_and_predicates() -> None:
+    doc = SourceDocument(
+        source_id="csv-multi",
+        uri="file:///multi.csv",
+        source_type=SourceType.CSV,
+        content=(
+            "subject,subject_type,predicate,object,object_type,statement,category,tags,reliability,object_is_entity\n"
+            'Civic Honors,ORG,PUBLISHED_IN,2006,DATE,"Civic Honors was published in 2006.",Publication,"civic,history",VERIFIED,true\n'
+            'Nels Lindahl,PERSON,AFFILIATED_WITH,University of Kansas,ORG,"Nels Lindahl studied at the University of Kansas.",Biography,"ku,alumni",LIKELY_TRUE,true\n'
+            'University of Kansas,ORG,LOCATED_IN,Lawrence,GPE,"The University of Kansas is located in Lawrence.",Geography,"kansas,education",VERIFIED,true\n'
+            'Civic Honors,ORG,HAS_EDITION_COUNT,1,NUMBER,"Civic Honors had 1 initial edition.",Meta,"meta",VERIFIED,false\n'
+        ),
+        trust_weight=0.9,
+    )
+    batch = StructuredMapper().map_document(doc)
+
+    by_name: dict[str, list[Entity]] = {}
+    for ent in batch.entities:
+        by_name.setdefault(ent.canonical_name, []).append(ent)
+
+    assert len(by_name["Civic Honors"]) == 1
+    assert by_name["Civic Honors"][0].entity_type == "ORG"
+    assert len(by_name["2006"]) == 1
+    assert by_name["2006"][0].entity_type == "DATE"
+    assert len(by_name["Nels Lindahl"]) == 1
+    assert by_name["Nels Lindahl"][0].entity_type == "PERSON"
+    assert len(by_name["University of Kansas"]) == 1
+    assert by_name["University of Kansas"][0].entity_type == "ORG"
+    assert len(by_name["Lawrence"]) == 1
+    assert by_name["Lawrence"][0].entity_type == "GPE"
+    assert "1" not in by_name
+
+    rel_types = {r.relation_type for r in batch.relations}
+    assert {"PUBLISHED_IN", "AFFILIATED_WITH", "LOCATED_IN", "MENTIONS"}.issubset(rel_types)
+    assert "HAS_EDITION_COUNT" not in rel_types
+    assert len(batch.claims) == 4
+    assert batch.claims[3].object_literal == "1"
+    assert batch.claims[3].object_id is None
+
+
 def test_resolve_entities_merges_variants_and_remaps_endpoints() -> None:
     b1 = MappedBatch(
         source_document=SourceDocument(

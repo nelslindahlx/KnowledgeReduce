@@ -9,6 +9,8 @@ from typing import Annotated, TextIO, cast
 
 import structlog
 import typer
+import yaml
+from pydantic import ValidationError
 
 from knowledgereduce.export import (
     export_gexf,
@@ -86,7 +88,7 @@ def run_command(
         cfg = PipelineConfig.from_yaml(config_file)
         layer_data = PipelineRunner().run(cfg)
         typer.echo(layer_data.layer.model_dump_json(indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError, yaml.YAMLError, OSError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -118,7 +120,7 @@ def ingest_command(
             docs.extend(ingest_local_file(path))
         out = write_jsonl_checkpoint(docs, output)
         typer.echo(json.dumps({"document_count": len(docs), "checkpoint": str(out)}, indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -161,7 +163,7 @@ def map_command(
                 indent=2,
             )
         )
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -197,7 +199,7 @@ def reduce_command(
             batches, cfg
         )
         typer.echo(layer_data.layer.model_dump_json(indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -226,7 +228,7 @@ def stack_command(
             overwrite=overwrite,
         )
         typer.echo(stacked.layer.model_dump_json(indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -245,7 +247,7 @@ def diff_command(
             left_layer_id, right_layer_id
         )
         typer.echo(diff.model_dump_json(indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -287,7 +289,7 @@ def query_command(
             qb = qb.filter_text(query)
         claims = qb.limit(top_k).execute_claims()
         typer.echo(json.dumps([c.model_dump(mode="json") for c in claims], indent=2))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -320,7 +322,7 @@ def export_command(
         else:
             raise KnowledgeReduceError(f"Unsupported format {format!r}.")
         typer.echo(str(out))
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -340,7 +342,7 @@ def validate_command(
         typer.echo(report.model_dump_json(indent=2))
         if strict and not report.valid:
             raise typer.Exit(code=1)
-    except KnowledgeReduceError as exc:
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

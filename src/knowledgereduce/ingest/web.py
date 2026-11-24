@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+import warnings
 from collections import deque
 from datetime import datetime
 from typing import Any
@@ -13,7 +14,6 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 import structlog
-import trafilatura
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -75,9 +75,15 @@ def _extract_metadata_from_html(html: str) -> dict[str, str | None]:
     }
 
 
-def extract_main_text(html: str, url: str = "") -> tuple[str, dict[str, str | None]]:
-    """Extract clean prose and metadata from HTML without nested DOM duplication."""
-    meta = _extract_metadata_from_html(html)
+def _extract_with_trafilatura(html: str, url: str) -> str | None:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"SOCKS support in urllib3.*",
+            category=Warning,
+        )
+        import trafilatura
+
     extracted = trafilatura.extract(
         html,
         url=url or None,
@@ -85,6 +91,13 @@ def extract_main_text(html: str, url: str = "") -> tuple[str, dict[str, str | No
         include_tables=True,
         favor_precision=False,
     )
+    return extracted if isinstance(extracted, str) else None
+
+
+def extract_main_text(html: str, url: str = "") -> tuple[str, dict[str, str | None]]:
+    """Extract clean prose and metadata from HTML without nested DOM duplication."""
+    meta = _extract_metadata_from_html(html)
+    extracted = _extract_with_trafilatura(html, url)
     if extracted and extracted.strip():
         return extracted.strip(), meta
 

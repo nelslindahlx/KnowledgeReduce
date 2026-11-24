@@ -173,3 +173,28 @@ local_files:
 
     bad = runner.invoke(app, ["validate", "does-not-exist", "--store", str(tmp_path / "store")])
     assert bad.exit_code == 1
+    assert "Error:" in bad.output
+
+    bad_rel = runner.invoke(
+        app,
+        ["query", "yaml-run", "--min-reliability", "99", "--store", str(tmp_path / "store")],
+    )
+    assert bad_rel.exit_code == 1
+    assert "Error:" in bad_rel.output
+
+    ckpt_empty = tmp_path / "empty_ingested.jsonl"
+    ckpt_empty.write_text("", encoding="utf-8")
+    bad_mapper = runner.invoke(
+        app,
+        [
+            "map",
+            "--input",
+            str(ckpt_empty),
+            "--output",
+            str(tmp_path / "out_mapped.jsonl"),
+            "--mapper",
+            "bogus",
+        ],
+    )
+    assert bad_mapper.exit_code == 1
+    assert "Error:" in bad_mapper.output

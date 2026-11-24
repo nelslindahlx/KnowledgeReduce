@@ -31,6 +31,7 @@ class EntityMappingRule(BaseModel):
 
     name_field: str
     entity_type: str = "CONCEPT"
+    entity_type_field: str | None = None
     id_field: str | None = None
     alias_fields: list[str] = Field(default_factory=list)
     attribute_fields: list[str] = Field(default_factory=list)
@@ -43,9 +44,12 @@ class RelationMappingRule(BaseModel):
 
     source_name_field: str
     source_type: str = "CONCEPT"
+    source_type_field: str | None = None
     target_name_field: str
     target_type: str = "CONCEPT"
+    target_type_field: str | None = None
     relation_type: str = "RELATED_TO"
+    relation_type_field: str | None = None
 
 
 class StructuredMappingConfig(BaseModel):
@@ -93,6 +97,20 @@ def _parse_tags(raw: Any) -> list[str]:
     return []
 
 
+def _row_object_is_entity(row: dict[str, Any]) -> bool:
+    """Return False when ``object_is_entity`` is explicitly set to a falsy value."""
+    if "object_is_entity" not in row:
+        return True
+    raw = row["object_is_entity"]
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return raw != 0
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"false", "0"}
+    return bool(raw)
+
+
 def _parse_records(doc: SourceDocument) -> list[dict[str, Any]]:
     if doc.source_type == SourceType.CSV:
         reader = csv.DictReader(io.StringIO(doc.content))
@@ -129,14 +147,16 @@ class StructuredMapper:
             entities.append(
                 EntityMappingRule(
                     name_field="subject",
-                    entity_type=str(sample_row.get("subject_type") or "CONCEPT"),
+                    entity_type="CONCEPT",
+                    entity_type_field="subject_type" if "subject_type" in sample_row else None,
                 )
             )
-        if "object" in sample_row and sample_row.get("object_is_entity", True):
+        if "object" in sample_row:
             entities.append(
                 EntityMappingRule(
                     name_field="object",
-                    entity_type=str(sample_row.get("object_type") or "CONCEPT"),
+                    entity_type="CONCEPT",
+                    entity_type_field="object_type" if "object_type" in sample_row else None,
                 )
             )
         relations: list[RelationMappingRule] = []
@@ -144,10 +164,13 @@ class StructuredMapper:
             relations.append(
                 RelationMappingRule(
                     source_name_field="subject",
-                    source_type=str(sample_row.get("subject_type") or "CONCEPT"),
+                    source_type="CONCEPT",
+                    source_type_field="subject_type" if "subject_type" in sample_row else None,
                     target_name_field="object",
-                    target_type=str(sample_row.get("object_type") or "CONCEPT"),
-                    relation_type=str(sample_row.get("predicate") or "RELATED_TO").upper(),
+                    target_type="CONCEPT",
+                    target_type_field="object_type" if "object_type" in sample_row else None,
+                    relation_type="RELATED_TO",
+                    relation_type_field="predicate" if "predicate" in sample_row else None,
                 )
             )
         return StructuredMappingConfig(
@@ -187,13 +210,24 @@ class StructuredMapper:
             field_to_entity_id: dict[str, str] = {}
 
             for rule in cfg.entities:
+                if (
+                    self.config is None
+                    and rule.name_field == "object"
+                    and not _row_object_is_entity(row)
+                ):
+                    continue
                 raw_name = str(row.get(rule.name_field) or "").strip()
                 if not raw_name:
                     continue
+                ent_type = (
+                    (str(row.get(rule.entity_type_field) or "").strip() or rule.entity_type)
+                    if rule.entity_type_field
+                    else rule.entity_type
+                )
                 if rule.id_field and row.get(rule.id_field):
                     ent_id = str(row[rule.id_field]).strip()
                 else:
-                    ent_id = deterministic_id("ent", rule.entity_type, raw_name)
+                    ent_id = deterministic_id("ent", ent_type, raw_name)
 
                 aliases = [
                     str(row[af]).strip()
@@ -210,7 +244,7 @@ class StructuredMapper:
                     entities_by_id[ent_id] = Entity(
                         entity_id=ent_id,
                         canonical_name=raw_name,
-                        entity_type=rule.entity_type,
+                        entity_type=ent_type,
                         aliases=aliases,
                         attributes=attrs,
                         evidence=[evidence],
@@ -225,37 +259,57 @@ class StructuredMapper:
                 field_to_entity_id[rule.name_field] = ent_id
 
             for rel_rule in cfg.relations:
+                if (
+                    self.config is None
+                    and rel_rule.target_name_field == "object"
+                    and not _row_object_is_entity(row)
+                ):
+                    continue
                 src_name = str(row.get(rel_rule.source_name_field) or "").strip()
                 dst_name = str(row.get(rel_rule.target_name_field) or "").strip()
                 if not src_name or not dst_name:
                     continue
+                src_type = (
+                    (str(row.get(rel_rule.source_type_field) or "").strip() or rel_rule.source_type)
+                    if rel_rule.source_type_field
+                    else rel_rule.source_type
+                )
+                dst_type = (
+                    (str(row.get(rel_rule.target_type_field) or "").strip() or rel_rule.target_type)
+                    if rel_rule.target_type_field
+                    else rel_rule.target_type
+                )
                 src_id = field_to_entity_id.get(
                     rel_rule.source_name_field,
-                    deterministic_id("ent", rel_rule.source_type, src_name),
+                    deterministic_id("ent", src_type, src_name),
                 )
                 dst_id = field_to_entity_id.get(
                     rel_rule.target_name_field,
-                    deterministic_id("ent", rel_rule.target_type, dst_name),
+                    deterministic_id("ent", dst_type, dst_name),
                 )
                 if src_id not in entities_by_id:
                     entities_by_id[src_id] = Entity(
                         entity_id=src_id,
                         canonical_name=src_name,
-                        entity_type=rel_rule.source_type,
+                        entity_type=src_type,
                         evidence=[evidence],
                     )
                 if dst_id not in entities_by_id:
                     entities_by_id[dst_id] = Entity(
                         entity_id=dst_id,
                         canonical_name=dst_name,
-                        entity_type=rel_rule.target_type,
+                        entity_type=dst_type,
                         evidence=[evidence],
                     )
-                rel_type = (
-                    str(row.get("predicate") or rel_rule.relation_type).strip().upper()
-                    if rel_rule.relation_type == "RELATED_TO" and row.get("predicate")
-                    else rel_rule.relation_type
-                )
+                if rel_rule.relation_type_field:
+                    rel_type = (
+                        str(row.get(rel_rule.relation_type_field) or "").strip()
+                        or rel_rule.relation_type
+                    ).upper()
+                elif rel_rule.relation_type == "RELATED_TO" and row.get("predicate"):
+                    rel_type = str(row["predicate"]).strip().upper()
+                else:
+                    rel_type = rel_rule.relation_type
                 rel_id = deterministic_id("rel", src_id, rel_type, dst_id)
                 if rel_id not in relations_by_id:
                     relations_by_id[rel_id] = Relation(

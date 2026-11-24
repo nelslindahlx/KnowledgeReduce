@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ToolError
 
 from knowledgereduce.mcp import create_mcp_server
@@ -218,9 +221,39 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         assert not exp_res.is_error
         assert (ws / out_rel).exists()
 
-    # 10. Path traversal attempts must fail inside MCP server with actionable ToolError
+    # 10. Path traversal & validation errors must fail inside MCP server with actionable ToolError
     with pytest.raises(ToolError, match="escapes"):
         await server.call_tool(
             "export_layer",
             {"layer_id": "ch-curated", "format": "json", "output_path": "../escape.json"},
         )
+
+    with pytest.raises(ToolError, match="Extra inputs are not permitted"):
+        await server.call_tool(
+            "submit_mapped_batch",
+            {"batches": [{"source_id": "extra"}]},
+        )
+
+    with pytest.raises(ToolError, match="ConflictStrategy"):
+        await server.call_tool(
+            "resolve_and_reduce",
+            {"layer_id": "bad-enum", "layer_name": "Bad", "conflict_strategy": "invalid"},
+        )
+
+    with pytest.raises(ToolError, match="ReliabilityRating"):
+        await server.call_tool(
+            "query_knowledge_graph",
+            {"layer_id": "ch-curated", "min_reliability": 99},
+        )
+
+
+async def test_mcp_stdio_subprocess_initialize_and_list_tools(tmp_path: Path) -> None:
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "knowledgereduce.cli", "mcp", "--workspace", str(tmp_path)],
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        init = await session.initialize()
+        assert init.server_info.name == "knowledgereduce"
+        tools_res = await session.list_tools()
+        assert len(tools_res.tools) == 11

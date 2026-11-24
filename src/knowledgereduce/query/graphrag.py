@@ -103,18 +103,37 @@ class HybridGraphRAGRetriever:
 
         for clm, total, lex, sem in top_items:
             neighbors: list[dict[str, str]] = []
+            seen_neighbor_edges: set[tuple[str, str, str]] = set()
             if clm.claim_id in graph and hops > 0:
                 sub = k_hop_neighborhood(graph, clm.claim_id, k=hops, directed=False)
                 for src, dst, _key, attrs in sub.edges(keys=True, data=True):
-                    other = dst if src == clm.claim_id else src
-                    if other != clm.claim_id and other in sub.nodes:
-                        neighbors.append(
-                            {
-                                "node_id": str(other),
-                                "relation_type": str(attrs.get("relation_type", "")),
-                                "label": str(sub.nodes[other].get("label", other)),
-                            }
-                        )
+                    rel_type = str(attrs.get("relation_type", ""))
+                    edge_sig = (str(src), str(dst), rel_type)
+                    if edge_sig in seen_neighbor_edges:
+                        continue
+                    seen_neighbor_edges.add(edge_sig)
+                    if src == clm.claim_id and dst in sub.nodes:
+                        other = dst
+                        label = str(sub.nodes[dst].get("label", dst))
+                    elif dst == clm.claim_id and src in sub.nodes:
+                        other = src
+                        label = str(sub.nodes[src].get("label", src))
+                    elif src in sub.nodes and dst in sub.nodes:
+                        other = dst
+                        src_label = str(sub.nodes[src].get("label", src))
+                        dst_label = str(sub.nodes[dst].get("label", dst))
+                        label = f"{src_label} -> {dst_label}"
+                    else:
+                        continue
+                    neighbors.append(
+                        {
+                            "node_id": str(other),
+                            "relation_type": rel_type,
+                            "label": label,
+                            "source_id": str(src),
+                            "target_id": str(dst),
+                        }
+                    )
                 for node_id in sub.nodes():
                     if node_id in entity_map:
                         collected_entities[node_id] = entity_map[node_id]

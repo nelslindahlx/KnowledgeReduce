@@ -79,3 +79,54 @@ All file paths passed to MCP tools are strictly sandboxed inside `--workspace` v
 3. **Reduce:** Call `resolve_and_reduce(layer_id="base-v1", conflict_strategy="preserve_dispute")`.
 4. **Adjudicate:** Call `list_conflicts("base-v1")` to review disputed facts and their competing evidence, then call `resolve_conflict(base_layer_id="base-v1", ..., target_layer_id="curated-v1")` to publish an immutable audited layer.
 5. **Query & Export:** Query via `query_knowledge_graph("curated-v1", query=..., hops=1)` or export via `export_layer`.
+
+### Example `submit_mapped_batch` Payload
+
+Each item in `batches` validates strictly (`extra="forbid"`) against the `MappedBatch` schema using the top-level keys `source_document`, `entities`, `claims`, and `relations`:
+
+```json
+{
+  "batches": [
+    {
+      "source_document": {
+        "source_id": "antigravity_review",
+        "uri": "agent://antigravity/session-1",
+        "source_type": "agent",
+        "title": "Agent Curated Notes",
+        "content": "Civic Honors was published in 2006.",
+        "trust_weight": 0.95
+      },
+      "entities": [
+        {
+          "entity_id": "ent_ch",
+          "canonical_name": "Civic Honors",
+          "entity_type": "ORG",
+          "evidence": [{"source_id": "antigravity_review", "excerpt": "Civic Honors", "extractor_name": "antigravity"}]
+        }
+      ],
+      "claims": [
+        {
+          "claim_id": "clm_ag_1",
+          "statement": "Civic Honors was published in 2006.",
+          "category": "Publication",
+          "reliability": 4,
+          "source_id": "antigravity_review",
+          "subject_id": "ent_ch",
+          "predicate": "PUBLISHED_IN",
+          "object_literal": "2006",
+          "evidence": [{"source_id": "antigravity_review", "excerpt": "published in 2006", "extractor_name": "antigravity"}]
+        }
+      ],
+      "relations": [
+        {
+          "relation_id": "rel_ag_1",
+          "source_id": "clm_ag_1",
+          "target_id": "ent_ch",
+          "relation_type": "MENTIONS"
+        }
+      ]
+    }
+  ],
+  "append": true
+}
+```
