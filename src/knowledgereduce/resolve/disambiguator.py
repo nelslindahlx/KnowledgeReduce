@@ -20,6 +20,13 @@ from knowledgereduce.resolve.blocking import DisjointSet
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 _HONORIFIC_PREFIX_RE = re.compile(r"^(?:dr|prof|mr|mrs|ms)\.?\s+")
+_TYPE_SPECIFICITY: dict[str, int] = {
+    "DATE": 5,
+    "GPE": 4,
+    "ORG": 3,
+    "PERSON": 2,
+    "CONCEPT": 1,
+}
 
 
 def _norm_entity_key(name: str) -> str:
@@ -38,49 +45,76 @@ def _dedup_evidence(items: Sequence[Evidence]) -> list[Evidence]:
     return out
 
 
+def _initial_token_match(tok_a: str, tok_b: str) -> bool:
+    return (
+        tok_a == tok_b
+        or (len(tok_a) == 1 and tok_b.startswith(tok_a))
+        or (len(tok_b) == 1 and tok_a.startswith(tok_b))
+    )
+
+
 def _names_match_with_initials(name_a: str, name_b: str) -> bool:
-    """Detect initial-abbreviated matches like 'J. Smith' vs 'John Smith'."""
+    """Detect initial-abbreviated matches like 'J. Smith' vs 'John Smith' or 'Charles Carlsen' vs 'Charles J. Carlsen'."""
     toks_a = _norm_entity_key(name_a).split()
     toks_b = _norm_entity_key(name_b).split()
-    if len(toks_a) != len(toks_b) or len(toks_a) < 2:
+    if len(toks_a) < 2 or len(toks_b) < 2:
         return False
-    if toks_a[-1] != toks_b[-1]:
+    if toks_a[-1] != toks_b[-1] or len(toks_a[-1]) < 2:
         return False
-    for ta, tb in zip(toks_a[:-1], toks_b[:-1], strict=True):
-        if ta == tb:
-            continue
-        if (len(ta) == 1 and tb.startswith(ta)) or (len(tb) == 1 and ta.startswith(tb)):
-            continue
-        return False
-    return True
+
+    given_a = toks_a[:-1]
+    given_b = toks_b[:-1]
+    if len(given_a) == len(given_b):
+        return all(_initial_token_match(ta, tb) for ta, tb in zip(given_a, given_b, strict=True))
+
+    if abs(len(given_a) - len(given_b)) == 1:
+        short, longer = (given_a, given_b) if len(given_a) < len(given_b) else (given_b, given_a)
+        for drop_idx, tok in enumerate(longer):
+            if len(tok) != 1:
+                continue
+            reduced = [*longer[:drop_idx], *longer[drop_idx + 1 :]]
+            if all(
+                _initial_token_match(s_tok, r_tok)
+                for s_tok, r_tok in zip(short, reduced, strict=True)
+            ):
+                return True
+
+    return False
 
 
-def _are_entities_equivalent(ent_a: Entity, ent_b: Entity, cutoff: float) -> bool:
-    # Allow CONCEPT to merge into a more specific entity type on exact normalized key or alias match.
-    types_compatible = ent_a.entity_type == ent_b.entity_type or "CONCEPT" in {
+def _are_entities_equivalent(
+    ent_a: Entity,
+    ent_b: Entity,
+    cutoff: float,
+    *,
+    merge_exact_cross_type: bool = True,
+) -> bool:
+    same_or_concept = ent_a.entity_type == ent_b.entity_type or "CONCEPT" in {
         ent_a.entity_type,
         ent_b.entity_type,
     }
-    if not types_compatible:
-        return False
+    key_a = _norm_entity_key(ent_a.canonical_name)
+    key_b = _norm_entity_key(ent_b.canonical_name)
 
-    names_a = {_norm_entity_key(ent_a.canonical_name)} | {
-        _norm_entity_key(a) for a in ent_a.aliases
-    }
-    names_b = {_norm_entity_key(ent_b.canonical_name)} | {
-        _norm_entity_key(a) for a in ent_b.aliases
-    }
+    names_a = {key_a} | {_norm_entity_key(a) for a in ent_a.aliases}
+    names_b = {key_b} | {_norm_entity_key(a) for a in ent_b.aliases}
     names_a.discard("")
     names_b.discard("")
 
     if names_a & names_b:
-        return True
+        if same_or_concept:
+            return True
+        if (
+            merge_exact_cross_type
+            and key_a
+            and key_a == key_b
+            and (ent_a.entity_type == "DATE") == (ent_b.entity_type == "DATE")
+        ):
+            return True
 
     if ent_a.entity_type != ent_b.entity_type:
         return False
 
-    key_a = _norm_entity_key(ent_a.canonical_name)
-    key_b = _norm_entity_key(ent_b.canonical_name)
     if not key_a or not key_b:
         return False
 
@@ -94,7 +128,7 @@ def _merge_entity_group(group: Sequence[Entity]) -> Entity:
     group_sorted = sorted(
         group,
         key=lambda e: (
-            e.entity_type != "CONCEPT",
+            _TYPE_SPECIFICITY.get(e.entity_type, 2),
             len(e.evidence),
             len(e.canonical_name),
             e.entity_id,
@@ -127,6 +161,7 @@ def resolve_entities_and_remap(
     batches: Sequence[MappedBatch],
     *,
     lexical_threshold: float = 0.88,
+    merge_exact_cross_type: bool = True,
 ) -> tuple[list[Entity], list[Claim], list[Relation], list[SourceDocument], dict[str, str]]:
     """Disambiguate entities across batches and atomically rewrite all Claim/Relation endpoints.
 
@@ -185,7 +220,12 @@ def resolve_entities_and_remap(
                 if pair in checked_pairs or dsu.find(i) == dsu.find(j):
                     continue
                 checked_pairs.add(pair)
-                if _are_entities_equivalent(unique_entities[i], unique_entities[j], cutoff):
+                if _are_entities_equivalent(
+                    unique_entities[i],
+                    unique_entities[j],
+                    cutoff,
+                    merge_exact_cross_type=merge_exact_cross_type,
+                ):
                     dsu.union(i, j)
 
     canonical_entities: list[Entity] = []
