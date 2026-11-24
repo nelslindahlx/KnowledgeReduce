@@ -48,8 +48,10 @@ _FULL_DATE_RE = re.compile(
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 # General capitalized multi-word phrases (fallback entity detector).
 _CAP_PHRASE_RE = re.compile(
-    r"\b[A-Z][A-Za-z0-9-]+(?:\s+(?:of|for|and|with|in|the|on)?\s*[A-Z][A-Za-z0-9-]+){1,4}\b"
+    r"\b[A-Z][A-Za-z0-9-]+(?:\s+(?:of|for|the)?\s*[A-Z][A-Za-z0-9-]+){1,4}\b"
 )
+# CamelCase / PascalCase technical or system identifiers (e.g., KnowledgeReduce, DuckDB, MapReduce).
+_CAMEL_ENTITY_RE = re.compile(r"\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b")
 
 _STOP_LEADING_WORDS = frozenset(
     {
@@ -58,6 +60,13 @@ _STOP_LEADING_WORDS = frozenset(
         "These",
         "That",
         "Those",
+        "Each",
+        "Every",
+        "Many",
+        "Most",
+        "Some",
+        "All",
+        "Both",
         "A",
         "An",
         "In",
@@ -254,6 +263,9 @@ def _extract_entities_from_sentence(sentence: str) -> list[tuple[str, str, list[
         candidate = _strip_leading_stop_words(m.group(0).strip())
         if not candidate or len(candidate.split()) < 2:
             continue
+        words = candidate.split()
+        if all(w.isupper() for w in words):
+            continue
         low = candidate.lower()
         # Skip if already part of a longer extracted entity
         if any(low in existing_key or existing_key in low for existing_key in found):
@@ -261,7 +273,6 @@ def _extract_entities_from_sentence(sentence: str) -> list[tuple[str, str, list[
         if low in _NON_PERSON_PHRASES:
             _register(candidate, "CONCEPT")
         else:
-            words = candidate.split()
             if (
                 2 <= len(words) <= 3
                 and all(w[0].isupper() and w[1:].islower() for w in words)
@@ -287,6 +298,13 @@ def _extract_entities_from_sentence(sentence: str) -> list[tuple[str, str, list[
                 _register(candidate, "PERSON")
             else:
                 _register(candidate, "CONCEPT")
+
+    for m in _CAMEL_ENTITY_RE.finditer(sentence):
+        candidate = m.group(0).strip()
+        low = candidate.lower()
+        if any(low in existing_key or existing_key in low for existing_key in found):
+            continue
+        _register(candidate, "CONCEPT")
 
     return list(found.values())
 

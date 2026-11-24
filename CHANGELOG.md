@@ -2,6 +2,15 @@
 
 All notable changes to KnowledgeReduce are documented in this file.
 
+## [1.1.0] - 2026-11-23
+
+### Added
+- **Persisted Claim Embeddings & Bounded Subgraph Retrieval:** Added stateless `HashingEmbeddingProvider`, Parquet-backed `claim_embeddings.parquet` index (`save_claim_embeddings` / `load_claim_embeddings` / `HybridGraphRAGRetriever.build_index`), parameterized DuckDB lexical ranking (`search_claims_lexical`), batch ID lookups (`get_claims_by_ids`), and bounded BFS subgraph extraction (`get_k_hop_subgraph`) cutting 10K-fact GraphRAG traced memory by ~37% and halving warm query latency.
+- **Cross-Layer Reconciliation (`StackManager`):** Added opt-in `reconcile=True` and `lexical_threshold` to `stack_overlay` and `merge_layers` (`UNION`/`OVERLAY`), plus `--reconcile` in `kr stack` and `reconcile` in MCP `stack_layers`.
+- **CLI Conflict Adjudication Parity:** Extracted shared `adjudicate_conflict()` helper and added `kr conflicts` and `kr resolve-conflict` CLI commands; `kr ingest` now exits non-zero with a clear `IngestionError` if no files or URLs are supplied.
+- **Sparse JSON/JSONL Schema Inference:** `StructuredMapper` now infers columns across the union of all records (`_collect_present_fields`) rather than only `rows[0]`.
+- **Deterministic NER & Release Tooling:** Added CamelCase/PascalCase entity extraction (`_CAMEL_ENTITY_RE`), guarded ALL-CAPS phrases, expanded test coverage across `[nlp]`/`[embeddings]` paths (89.9% total coverage), upgraded GitHub Actions to `actions/checkout@v7` & `astral-sh/setup-uv@v10.4.0`, and added manual PyPI Trusted Publisher `.github/workflows/release.yml`.
+
 ## [1.0.0] - 2026-11-23
 
 ### Added

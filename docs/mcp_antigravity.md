@@ -62,7 +62,7 @@ All file paths passed to MCP tools are strictly sandboxed inside `--workspace` v
 | `run_local_map` | Run local `deterministic`, `structured`, or `spacy` mapper into `02_mapped.jsonl` | `ingested_checkpoint`, `mapped_checkpoint`, `mapper` |
 | `submit_mapped_batch` | Inject Antigravity-extracted `MappedBatch` objects directly into `02_mapped.jsonl` | `batches`, `mapped_checkpoint`, `append` |
 | `resolve_and_reduce` | Entity resolution, 3-stage dedup, conflict detection, integrity gate → Parquet layer | `layer_id`, `layer_name`, `mapped_checkpoint`, `conflict_strategy` |
-| `stack_layers` | Compose layers via `overlay`, `union`, `intersection`, or `difference` | `layer_ids`, `target_layer_id`, `mode`, `conflict_strategy` |
+| `stack_layers` | Compose layers via `overlay`, `union`, `intersection`, or `difference` (with optional cross-layer `reconcile`) | `layer_ids`, `target_layer_id`, `mode`, `conflict_strategy`, `reconcile` |
 | `diff_layers` | Compute added/removed/modified entities, claims, relations, and resolved conflicts | `left_layer_id`, `right_layer_id` |
 | `query_knowledge_graph` | Hybrid GraphRAG semantic+lexical+graph search or structured tag/category/reliability queries | `layer_id`, `query`, `category`, `tag`, `min_reliability`, `top_k`, `hops` |
 | `list_conflicts` | Inspect unresolved (`needs_review=True`) or historical `ConflictRecord`s | `layer_id`, `needs_review_only`, `limit` |

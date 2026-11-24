@@ -456,19 +456,31 @@ def run_scaling_benchmark(num_facts: int) -> dict[str, float | int]:
         store.save_layer(reduced)
         t_store = time.perf_counter() - t1
 
+        retriever = HybridGraphRAGRetriever(store)
         t2 = time.perf_counter()
-        ctx = HybridGraphRAGRetriever(store).retrieve(
+        ctx_cold = retriever.retrieve(
             f"scale-{num_facts}",
             "community engagement milestone record 10",
             top_k=5,
             hops=1,
         )
-        t_query = time.perf_counter() - t2
-        assert len(ctx.results) > 0
+        t_cold = time.perf_counter() - t2
+        assert len(ctx_cold.results) > 0
+
+        t3 = time.perf_counter()
+        ctx_warm = retriever.retrieve(
+            f"scale-{num_facts}",
+            "community engagement milestone record 10",
+            top_k=5,
+            hops=1,
+        )
+        t_warm = time.perf_counter() - t3
+        assert len(ctx_warm.results) > 0
+        assert ctx_warm.results[0].claim.claim_id == ctx_cold.results[0].claim.claim_id
 
     _, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    total_s = t_reduce + t_store + t_query
+    total_s = t_reduce + t_store + t_cold
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
     # On macOS ru_maxrss is in bytes; on Linux it's in KiB. Normalize heuristically for display.
     if rss_mb < 10.0:
@@ -480,7 +492,9 @@ def run_scaling_benchmark(num_facts: int) -> dict[str, float | int]:
         "relations": len(reduced.relations),
         "reduce_seconds": round(t_reduce, 3),
         "store_seconds": round(t_store, 3),
-        "query_seconds": round(t_query, 3),
+        "query_seconds": round(t_cold, 3),
+        "query_cold_seconds": round(t_cold, 3),
+        "query_warm_seconds": round(t_warm, 3),
         "total_seconds": round(total_s, 3),
         "peak_traced_mib": round(peak_bytes / (1024 * 1024), 2),
         "max_rss_mb": round(rss_mb, 2),

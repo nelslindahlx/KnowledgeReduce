@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+from typing import Any
+
 import pytest
 
 from knowledgereduce.map import (
@@ -62,6 +66,148 @@ def test_deterministic_nlp_mapper_extracts_connected_entities_claims_and_relatio
     assert len(batch.claims) == 2
     assert any(c.predicate == "PUBLISHED_IN" and c.object_literal == "2006" for c in batch.claims)
     assert any(r.relation_type == "MENTIONS" for r in batch.relations)
+
+
+def test_deterministic_nlp_mapper_extracts_camelcase_and_skips_all_caps() -> None:
+    doc = SourceDocument(
+        source_id="src-camel",
+        uri="https://knowledgereduce.example/",
+        source_type=SourceType.TEXT,
+        content=(
+            "KnowledgeReduce extends MapReduce using DuckDB and StackManager layers. "
+            "PUBLISHED IN records stay ignored as multi-word phrases."
+        ),
+        trust_weight=0.85,
+    )
+    batch = DeterministicNLPMapper(min_sentence_length=15).map_document(doc)
+    names = {e.canonical_name for e in batch.entities}
+    assert {"KnowledgeReduce", "MapReduce", "DuckDB", "StackManager"}.issubset(names)
+    assert "PUBLISHED IN" not in names
+
+
+def test_spacy_nlp_mapper_errors_and_mocked_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeToken:
+        def __init__(
+            self,
+            idx: int,
+            *,
+            pos_: str = "NOUN",
+            dep_: str = "",
+            lemma_: str = "",
+            children: list[_FakeToken] | None = None,
+        ) -> None:
+            self.i = idx
+            self.pos_ = pos_
+            self.dep_ = dep_
+            self.lemma_ = lemma_
+            self.children = children or []
+
+    class _FakeSpan:
+        def __init__(self, text: str, label_: str, tokens: list[_FakeToken]) -> None:
+            self.text = text
+            self.label_ = label_
+            self._tokens = tokens
+
+        def __iter__(self) -> Any:
+            return iter(self._tokens)
+
+    class _FakeSent:
+        def __init__(
+            self,
+            text: str,
+            start_char: int,
+            end_char: int,
+            ents: list[_FakeSpan],
+            tokens: list[_FakeToken],
+        ) -> None:
+            self.text = text
+            self.start_char = start_char
+            self.end_char = end_char
+            self.ents = ents
+            self._tokens = tokens
+
+        def __iter__(self) -> Any:
+            return iter(self._tokens)
+
+    class _FakeDoc:
+        def __init__(self, sents: list[_FakeSent]) -> None:
+            self.sents = sents
+
+    def _build_parsed(text: str) -> _FakeDoc:
+        if "short" in text.lower():
+            short_sent = _FakeSent("Hi.", 0, 3, [], [])
+            return _FakeDoc([short_sent])
+
+        t_subj = _FakeToken(0, pos_="PROPN", dep_="nsubj", lemma_="Civic Honors")
+        t_obj = _FakeToken(3, pos_="GPE", dep_="pobj", lemma_="Lawrence")
+        t_prep = _FakeToken(2, pos_="ADP", dep_="prep", lemma_="in", children=[t_obj])
+        t_verb = _FakeToken(1, pos_="AUX", dep_="ROOT", lemma_="located", children=[t_subj, t_prep])
+        ent_ch = _FakeSpan("Civic Honors", "ORG", [t_subj])
+        ent_law = _FakeSpan("Lawrence", "GPE", [t_obj])
+        s1 = _FakeSent(
+            "Civic Honors is located in Lawrence for civic studies.",
+            0,
+            54,
+            [ent_ch, ent_law],
+            [t_subj, t_verb, t_prep, t_obj],
+        )
+        # Second sentence reuses Civic Honors so entity evidence accumulation branch runs
+        t_subj2 = _FakeToken(10, pos_="PROPN", dep_="nsubj", lemma_="Civic Honors")
+        t_obj2 = _FakeToken(12, pos_="DATE", dep_="dobj", lemma_="2006")
+        t_verb2 = _FakeToken(
+            11, pos_="VERB", dep_="ROOT", lemma_="published", children=[t_subj2, t_obj2]
+        )
+        ent_ch2 = _FakeSpan("Civic Honors", "ORG", [t_subj2])
+        ent_yr = _FakeSpan("2006", "DATE", [t_obj2])
+        s2 = _FakeSent(
+            "Civic Honors was published in 2006 globally.",
+            55,
+            99,
+            [ent_ch2, ent_yr],
+            [t_subj2, t_verb2, t_obj2],
+        )
+        return _FakeDoc([s1, s2])
+
+    class _FakeNLP:
+        def __call__(self, text: str) -> _FakeDoc:
+            return _build_parsed(text)
+
+        def pipe(self, texts: list[str]) -> list[_FakeDoc]:
+            return [_build_parsed(t) for t in texts]
+
+    fake_spacy = ModuleType("spacy")
+
+    def _missing_model(_name: str) -> Any:
+        raise OSError("model not downloaded")
+
+    fake_spacy.load = _missing_model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "spacy", fake_spacy)
+
+    doc = SourceDocument(
+        source_id="spacy-1",
+        uri="https://example.org/spacy",
+        content="long enough content",
+        trust_weight=0.9,
+    )
+    mapper = SpacyNLPMapper(model_name="missing_model", min_sentence_length=15)
+    with pytest.raises(ExtractionError, match="missing_model"):
+        mapper.map_document(doc)
+
+    fake_spacy.load = lambda _name: _FakeNLP()  # type: ignore[attr-defined]
+    mapper_ok = SpacyNLPMapper(model_name="en_core_web_sm", min_sentence_length=15)
+    assert mapper_ok.map_documents([]) == []
+
+    batch = mapper_ok.map_document(doc)
+    assert len(batch.claims) == 2
+    rel_types = {r.relation_type for r in batch.relations}
+    assert {"LOCATED", "PUBLISHED", "MENTIONS"}.issubset(rel_types)
+
+    short_doc = SourceDocument(
+        source_id="spacy-short", uri="https://example.org/short", content="short"
+    )
+    batches = mapper_ok.map_documents([doc, short_doc])
+    assert len(batches) == 2
+    assert batches[1].claims == []
 
 
 def test_structured_mapper_and_spacy_missing_dependency() -> None:

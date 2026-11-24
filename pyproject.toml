@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowledgereduce"
-version = "1.0.0"
+version = "1.1.0"
 description = "MapReduce-inspired framework for building stackable, conflict-aware knowledge graphs backed by DuckDB and Parquet."
 readme = "README.md"
 license = { file = "LICENSE" }

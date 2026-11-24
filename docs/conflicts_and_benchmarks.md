@@ -24,7 +24,7 @@ uv run python benchmarks/run_benchmark.py --scale 1000 10000
 ### A. 50-Document Frozen Golden Evaluation (`DeterministicNLPMapper` + `KnowledgeReducer`)
 Evaluates 50 multi-source CivicHonors + domain documents containing 15 thematic duplicate clusters (45 docs) and 5 planted factual contradictions (5 docs):
 
-| Metric | Measured Result | Notes |
+| Metric | Measured Result (`v1.1.0`) | Notes |
 |---|---|---|
 | **B-Cubed Precision** | **1.0000** | Zero unrelated claims falsely merged |
 | **B-Cubed Recall** | **0.9200** | Strong recall across paraphrase & punctuation variants |
@@ -32,15 +32,15 @@ Evaluates 50 multi-source CivicHonors + domain documents containing 15 thematic 
 | **Information Retention** | **1.0000** | 100% of distinct canonical themes retained (vs. 2.2% in legacy `v18`) |
 | **Conflict Detection Recall** | **1.0000** | 5 / 5 planted contradictions surfaced with `CONTRADICTS` edges |
 | **Conflict Resolution Accuracy** | **1.0000** | 5 / 5 provisional winners matched higher-trust ground truth |
-| **Claim-to-Entity Connectivity** | **0.7826** | Fraction of reduced claims linked to extracted entities via `MENTIONS` |
-| **Entity Extraction F1 (Deterministic Baseline)** | **0.5581** (P=0.5217, R=0.6000) | Zero-download baseline; upgrade via `[nlp]` (`SpacyNLPMapper`) or MCP `submit_mapped_batch` |
+| **Claim-to-Entity Connectivity** | **1.0000** | 100% of reduced claims linked to extracted entities via `MENTIONS` |
+| **Entity Extraction F1 (Deterministic Baseline)** | **0.7917** (P=0.6786, R=0.9500) | Zero-download baseline (CamelCase + phrase boundaries); upgrade further via `[nlp]` (`SpacyNLPMapper`) or MCP `submit_mapped_batch` |
 
 ### B. Single-Machine Scaling Benchmark (Apple Silicon arm64, Python 3.12)
-Includes end-to-end entity resolution, 3-stage claim clustering, `DuckDBParquetStore.save_layer`, and `HybridGraphRAGRetriever.retrieve`:
+Includes end-to-end entity resolution, 3-stage claim clustering, `DuckDBParquetStore.save_layer`, cold `HybridGraphRAGRetriever.retrieve` (builds `claim_embeddings.parquet`), and warm cached retrieval (bounded DuckDB subgraph):
 
-| Input Facts | Reduced Claims | Relations | Reduce Time | Parquet Store Time | GraphRAG Query Time | Total Wall Time | Peak Traced Memory |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1,000** | 700 | 700 | 1.667 s | 0.067 s | 0.415 s | **2.148 s** | 15.55 MiB |
-| **10,000** | 7,000 | 7,000 | 11.108 s | 0.572 s | 2.274 s | **13.954 s** | 136.15 MiB |
+| Input Facts | Reduced Claims | Relations | Reduce Time | Parquet Store Time | Cold Query (Build Index) | Warm Query (Cached) | Total Wall Time (Cold) | Peak Traced Memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **1,000** | 700 | 700 | 1.331 s | 0.062 s | 0.465 s | 0.221 s | **1.858 s** | 10.85 MiB |
+| **10,000** | 7,000 | 7,000 | 10.313 s | 0.564 s | 2.483 s | 1.068 s | **13.361 s** | 85.75 MiB |
 
-Scaling from 1,000 → 10,000 facts (10× input) increases total runtime by **6.5×** (`13.95 s`, well under the 60 s CI SLA), confirming sub-quadratic behavior via prefix/token blocking and coarse `MiniBatchKMeans` partitioning prior to `AgglomerativeClustering(metric="precomputed")`.
+Scaling from 1,000 → 10,000 facts (10× input) keeps total cold runtime at **`13.36 s`** (well under the 60 s CI SLA) and drops warm GraphRAG latency to **`1.07 s`** at **`85.75 MiB`** peak traced memory via DuckDB parameterized lexical search, persisted Parquet claim embeddings, and bounded k-hop subgraph loading.

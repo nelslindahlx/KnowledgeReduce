@@ -51,17 +51,19 @@ Each layer is stored atomically inside `<store_dir>/layers/<layer_id>/`:
 
 ```text
 <store_dir>/layers/<layer_id>/
-├── manifest.json          # schema_version "1.0", serialized KnowledgeLayer metadata, row counts & SHA-256 digests
-├── sources.parquet        # typed PyArrow/Zstd Parquet tables
+├── manifest.json              # schema_version "1.0", serialized KnowledgeLayer metadata, row counts & SHA-256 digests
+├── sources.parquet            # typed PyArrow/Zstd Parquet tables
 ├── entities.parquet
 ├── claims.parquet
 ├── relations.parquet
-└── conflicts.parquet
+├── conflicts.parquet
+└── claim_embeddings.parquet   # optional persisted L2-normalized claim vector index (created on build_index/first query)
 ```
 
-- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)` + `?` placeholders — zero SQL string interpolation).
+- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)`, `UNNEST(?::VARCHAR[])`, `list_filter(?::VARCHAR[], ...)`, `?` placeholders — zero SQL string interpolation).
+- `HybridGraphRAGRetriever` persists `claim_embeddings.parquet` for stateless embedding providers (`HashingEmbeddingProvider`, `SentenceTransformerProvider`), pre-filters lexical and vector candidates, and expands graph context via `get_k_hop_subgraph` without loading entire large layers into memory.
 - Empty tables preserve full PyArrow schemas.
-- Overwriting an existing immutable layer requires explicit `overwrite=True`.
+- Overwriting an existing immutable layer requires explicit `overwrite=True` (which cleanly invalidates any prior `claim_embeddings.parquet`).
 
 ---
 
@@ -71,6 +73,7 @@ Each layer is stored atomically inside `<store_dir>/layers/<layer_id>/`:
 - **`UNION`**: Combines all entities, claims, and relations across layers, merging matching IDs with provenance preservation.
 - **`INTERSECTION`**: Retains entities, claims, and relations present across all input layers.
 - **`DIFFERENCE`**: Subtracts subsequent layers from `layer_ids[0]` and automatically removes dangling relations whose endpoints were removed.
+- **Cross-Layer Reconciliation (`reconcile=True`)**: Available on `UNION` and `OVERLAY` to disambiguate equivalent entities with different IDs across independently generated layers, remap endpoints, surface cross-layer functional conflicts, and run `IntegrityValidator` strictly.
 - **Lineage DAG**: `build_lineage_graph()`, `get_ancestors()`, and `get_descendants()` traverse `parent_layer_ids` non-destructively.
 
 ---
