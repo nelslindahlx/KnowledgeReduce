@@ -141,6 +141,8 @@ Start `kr mcp --workspace /path/to/workspace` or register it in Antigravity's `m
 
 ## Development & Quality Checks
 
+All changes to `main` follow the **Maker / Checker Pull Request** workflow documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). Direct commits to `main` are disallowed; open a feature branch PR passing `quality-and-tests (3.11)`, `quality-and-tests (3.12)`, and `maker-checker-gate` for CODEOWNER review (`@nelslindahlx`).
+
 ```bash
 uv run ruff check src tests examples benchmarks
 uv run ruff format --check src tests examples benchmarks

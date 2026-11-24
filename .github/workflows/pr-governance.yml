@@ -1,0 +1,64 @@
+name: PR Governance
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  maker-checker-gate:
+    name: maker-checker-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify Maker / Checker PR metadata and repo hygiene
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          head_ref = os.environ.get("HEAD_REF", "").strip()
+          if not head_ref or head_ref == "main":
+              sys.exit(f"PR head branch must not be 'main' (got {head_ref!r}).")
+
+          pr_body = os.environ.get("PR_BODY", "").strip()
+          if not pr_body:
+              sys.exit("PR description must not be empty; complete the Maker / Checker template.")
+
+          has_maker = re.search(r"^##\s+Maker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE)
+          has_checker = re.search(r"^##\s+Checker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE)
+          if not has_maker or not has_checker:
+              sys.exit(
+                  "PR description must include both '## Maker ...' and '## Checker ...' sections."
+              )
+
+          pyc_files = subprocess.check_output(
+              ["git", "ls-files", "*.pyc"], text=True
+          ).strip()
+          if pyc_files:
+              sys.exit(f"Tracked .pyc bytecode files are forbidden:\n{pyc_files}")
+
+          for nb_path in sorted(glob.glob("notebooks/*.ipynb")):
+              with open(nb_path, encoding="utf-8") as fh:
+                  nb = json.load(fh)
+              for idx, cell in enumerate(nb.get("cells", [])):
+                  if cell.get("cell_type") != "code":
+                      continue
+                  if cell.get("outputs") or cell.get("execution_count") is not None:
+                      sys.exit(
+                          f"Notebook {nb_path} cell {idx} has committed outputs; strip via nbstripout."
+                      )
+
+          print("maker-checker-gate passed.")
+          PY
