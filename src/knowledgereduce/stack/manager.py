@@ -14,12 +14,15 @@ from knowledgereduce.models import (
     LayerData,
     LayerDiff,
     LayerTier,
+    MappedBatch,
     MergeMode,
     Relation,
     SourceDocument,
     StackError,
     utc_now,
 )
+from knowledgereduce.reduce import IntegrityValidator, resolve_claim_conflicts
+from knowledgereduce.resolve import resolve_entities_and_remap
 from knowledgereduce.storage.base import GraphStore, compute_layer_diff
 
 
@@ -236,6 +239,8 @@ class StackManager:
         target_name: str | None = None,
         tier: LayerTier = LayerTier.STACKED,
         conflict_strategy: ConflictStrategy = ConflictStrategy.PRESERVE_DISPUTE,
+        reconcile: bool = False,
+        lexical_threshold: float = 0.88,
         overwrite: bool = False,
     ) -> LayerData:
         """Compose *overlay_layer_id* on top of *base_layer_id* non-destructively."""
@@ -246,6 +251,8 @@ class StackManager:
             mode=MergeMode.OVERLAY,
             tier=tier,
             conflict_strategy=conflict_strategy,
+            reconcile=reconcile,
+            lexical_threshold=lexical_threshold,
             overwrite=overwrite,
         )
 
@@ -258,11 +265,15 @@ class StackManager:
         mode: MergeMode = MergeMode.UNION,
         tier: LayerTier = LayerTier.STACKED,
         conflict_strategy: ConflictStrategy = ConflictStrategy.PRESERVE_DISPUTE,
+        reconcile: bool = False,
+        lexical_threshold: float = 0.88,
         overwrite: bool = False,
     ) -> LayerData:
         """Combine multiple immutable layers using *mode* without mutating inputs."""
         if not layer_ids:
             raise StackError("At least one source layer_id is required to merge.")
+        if reconcile and mode not in {MergeMode.UNION, MergeMode.OVERLAY}:
+            raise StackError("reconcile=True is only supported for UNION and OVERLAY merge modes.")
         if len(layer_ids) < 2 and mode in {
             MergeMode.OVERLAY,
             MergeMode.INTERSECTION,
@@ -407,6 +418,53 @@ class StackManager:
             if rel.source_id in surviving_nodes and rel.target_id in surviving_nodes
         ]
 
+        if reconcile:
+            rec_entities, remapped_claims, remapped_rels, _rec_sources, _id_map = (
+                resolve_entities_and_remap(
+                    [
+                        MappedBatch(
+                            entities=list(entities.values()),
+                            claims=list(claims.values()),
+                            relations=valid_relations,
+                        )
+                    ],
+                    lexical_threshold=lexical_threshold,
+                )
+            )
+            source_trust = {s.source_id: s.trust_weight for s in sources.values()}
+            final_claims, contra_rels, new_conflicts = resolve_claim_conflicts(
+                remapped_claims,
+                source_trust,
+                strategy=conflict_strategy,
+            )
+            entities = {e.entity_id: e for e in rec_entities}
+            claims = {c.claim_id: c for c in final_claims}
+            rec_nodes = set(entities.keys()) | set(claims.keys())
+
+            dedup_rels: dict[tuple[str, str, str], Relation] = {}
+            for rel in [*remapped_rels, *contra_rels]:
+                if rel.source_id == rel.target_id:
+                    continue
+                if rel.source_id not in rec_nodes or rel.target_id not in rec_nodes:
+                    continue
+                triple_key = (rel.source_id, rel.target_id, rel.relation_type)
+                if triple_key in dedup_rels:
+                    existing = dedup_rels[triple_key]
+                    dedup_rels[triple_key] = existing.model_copy(
+                        update={
+                            "confidence": max(existing.confidence, rel.confidence),
+                            "weight": max(existing.weight, rel.weight),
+                            "evidence": _dedup_evidence([*existing.evidence, *rel.evidence]),
+                        }
+                    )
+                else:
+                    dedup_rels[triple_key] = rel
+            valid_relations = list(dedup_rels.values())
+
+            for cf in new_conflicts:
+                if cf.conflict_id not in conflicts or conflicts[cf.conflict_id].needs_review:
+                    conflicts[cf.conflict_id] = cf
+
         new_layer = KnowledgeLayer(
             layer_id=target_layer_id,
             name=target_name or f"{mode.value}({', '.join(layer_ids)})",
@@ -430,5 +488,7 @@ class StackManager:
             relations=valid_relations,
             conflicts=list(conflicts.values()),
         )
+        if reconcile:
+            IntegrityValidator().validate(result, strict=True)
         self.store.save_layer(result, overwrite=overwrite)
         return result

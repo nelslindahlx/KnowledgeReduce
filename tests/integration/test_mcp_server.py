@@ -182,6 +182,7 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
             "layer_ids": ["ch-base", "ch-curated"],
             "target_layer_id": "ch-stacked",
             "mode": "overlay",
+            "reconcile": True,
         },
     )
     assert not stack_res.is_error

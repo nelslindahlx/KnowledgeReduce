@@ -243,6 +243,7 @@ def create_mcp_server(
         target_name: str | None = None,
         conflict_strategy: str = "preserve_dispute",
         tier: str = "stacked",
+        reconcile: bool = False,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Compose immutable layers via overlay, union, intersection, or difference."""
@@ -253,6 +254,7 @@ def create_mcp_server(
             mode=MergeMode(mode),
             tier=LayerTier(tier),
             conflict_strategy=ConflictStrategy(conflict_strategy),
+            reconcile=reconcile,
             overwrite=overwrite,
         )
         return stacked.layer.model_dump(mode="json")

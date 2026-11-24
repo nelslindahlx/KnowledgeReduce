@@ -215,6 +215,11 @@ def stack_command(
     conflict_strategy: ConflictStrategy = typer.Option(  # noqa: B008
         ConflictStrategy.PRESERVE_DISPUTE, "--conflict-strategy"
     ),
+    reconcile: bool = typer.Option(
+        False,
+        "--reconcile",
+        help="Disambiguate entities and detect conflicts across distinct IDs.",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     """Stack or combine immutable knowledge layers (overlay, union, intersection, difference)."""
@@ -225,6 +230,7 @@ def stack_command(
             target_layer_id=target_layer_id,
             mode=mode,
             conflict_strategy=conflict_strategy,
+            reconcile=reconcile,
             overwrite=overwrite,
         )
         typer.echo(stacked.layer.model_dump_json(indent=2))

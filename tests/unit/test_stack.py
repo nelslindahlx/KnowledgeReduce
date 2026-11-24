@@ -15,6 +15,7 @@ from knowledgereduce.models import (
     MergeMode,
     Relation,
     ReliabilityRating,
+    SourceDocument,
     StackError,
 )
 from knowledgereduce.stack import StackManager
@@ -158,3 +159,127 @@ def test_stack_errors_on_missing_or_single_layer() -> None:
         mgr.merge_layers(["missing", "base"], target_layer_id="x")
     with pytest.raises(StackError):
         mgr.get_ancestors("missing")
+    with pytest.raises(StackError, match="reconcile=True"):
+        mgr.merge_layers(
+            ["base", "overlay"],
+            target_layer_id="bad-rec",
+            mode=MergeMode.DIFFERENCE,
+            reconcile=True,
+        )
+
+
+def test_stack_reconcile_merges_distinct_entity_ids_and_detects_conflicts() -> None:
+    store = MemoryGraphStore()
+    layer_a = LayerData(
+        layer=KnowledgeLayer(layer_id="layer-a", name="Layer A", tier=LayerTier.REDUCED),
+        sources=[SourceDocument(source_id="src_a", uri="https://a.example", trust_weight=0.95)],
+        entities=[
+            Entity(
+                entity_id="ent_a_nels",
+                canonical_name="Dr. Nels Lindahl",
+                entity_type="PERSON",
+                evidence=[Evidence(source_id="src_a", excerpt="Dr. Nels Lindahl")],
+            ),
+            Entity(
+                entity_id="ent_a_ch",
+                canonical_name="Civic Honors",
+                entity_type="ORG",
+                evidence=[Evidence(source_id="src_a", excerpt="Civic Honors")],
+            ),
+        ],
+        claims=[
+            Claim(
+                claim_id="clm_a_1",
+                statement="Civic Honors was published in 2006.",
+                source_id="src_a",
+                reliability=ReliabilityRating.VERIFIED,
+                subject_id="ent_a_ch",
+                predicate="PUBLISHED_IN",
+                object_literal="2006",
+                evidence=[Evidence(source_id="src_a", excerpt="published in 2006")],
+            )
+        ],
+        relations=[
+            Relation(
+                relation_id="rel_a_1",
+                source_id="clm_a_1",
+                target_id="ent_a_nels",
+                relation_type="MENTIONS",
+            ),
+            Relation(
+                relation_id="rel_a_2",
+                source_id="clm_a_1",
+                target_id="ent_a_ch",
+                relation_type="MENTIONS",
+            ),
+        ],
+    )
+    layer_b = LayerData(
+        layer=KnowledgeLayer(layer_id="layer-b", name="Layer B", tier=LayerTier.REDUCED),
+        sources=[SourceDocument(source_id="src_b", uri="https://b.example", trust_weight=0.45)],
+        entities=[
+            Entity(
+                entity_id="ent_b_nels",
+                canonical_name="Nels Lindahl",
+                entity_type="PERSON",
+                evidence=[Evidence(source_id="src_b", excerpt="Nels Lindahl")],
+            ),
+            Entity(
+                entity_id="ent_b_ch",
+                canonical_name="Civic Honors",
+                entity_type="ORG",
+                evidence=[Evidence(source_id="src_b", excerpt="Civic Honors")],
+            ),
+        ],
+        claims=[
+            Claim(
+                claim_id="clm_b_1",
+                statement="Civic Honors was published in 2020.",
+                source_id="src_b",
+                reliability=ReliabilityRating.POSSIBLY_TRUE,
+                subject_id="ent_b_ch",
+                predicate="PUBLISHED_IN",
+                object_literal="2020",
+                evidence=[Evidence(source_id="src_b", excerpt="published in 2020")],
+            )
+        ],
+        relations=[
+            Relation(
+                relation_id="rel_b_1",
+                source_id="clm_b_1",
+                target_id="ent_b_nels",
+                relation_type="MENTIONS",
+            ),
+            Relation(
+                relation_id="rel_b_2",
+                source_id="clm_b_1",
+                target_id="ent_b_ch",
+                relation_type="MENTIONS",
+            ),
+        ],
+    )
+    store.save_layer(layer_a)
+    store.save_layer(layer_b)
+    mgr = StackManager(store)
+
+    unreconciled = mgr.merge_layers(
+        ["layer-a", "layer-b"],
+        target_layer_id="union-raw",
+        mode=MergeMode.UNION,
+        reconcile=False,
+    )
+    assert len(unreconciled.entities) == 4
+    assert unreconciled.conflicts == []
+
+    reconciled = mgr.merge_layers(
+        ["layer-a", "layer-b"],
+        target_layer_id="union-reconciled",
+        mode=MergeMode.UNION,
+        reconcile=True,
+    )
+    assert len(reconciled.entities) == 2
+    assert len(reconciled.conflicts) == 1
+    assert reconciled.conflicts[0].winning_value == "2006"
+    assert any(r.relation_type == "CONTRADICTS" for r in reconciled.relations)
+    valid_eids = {e.entity_id for e in reconciled.entities}
+    assert all(c.subject_id in valid_eids for c in reconciled.claims)
