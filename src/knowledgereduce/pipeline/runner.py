@@ -29,11 +29,14 @@ from knowledgereduce.models import (
     MappedBatch,
     SourceDocument,
     SourceType,
+    StorageError,
 )
 from knowledgereduce.pipeline.config import PipelineConfig
+from knowledgereduce.query import HybridGraphRAGRetriever
 from knowledgereduce.reduce import KnowledgeReducer
 from knowledgereduce.resolve import (
     EmbeddingProvider,
+    HashingEmbeddingProvider,
     SentenceTransformerProvider,
     TfidfSVDProvider,
 )
@@ -68,10 +71,17 @@ def build_mapper(config: PipelineConfig) -> Mapper:
 
 
 def build_embedding_provider(config: PipelineConfig) -> EmbeddingProvider:
-    """Instantiate the configured EmbeddingProvider."""
+    """Instantiate the configured clustering EmbeddingProvider."""
     if config.use_sentence_transformers:
         return SentenceTransformerProvider(model_name=config.embedding_model)
     return TfidfSVDProvider()
+
+
+def build_retrieval_embedding_provider(config: PipelineConfig) -> EmbeddingProvider:
+    """Instantiate the stateless EmbeddingProvider used for persisted GraphRAG indexing."""
+    if config.use_sentence_transformers:
+        return SentenceTransformerProvider(model_name=config.embedding_model)
+    return HashingEmbeddingProvider()
 
 
 class PipelineRunner:
@@ -93,31 +103,70 @@ class PipelineRunner:
             return self._explicit_store
         return DuckDBParquetStore(config.store_dir)
 
+    def _load_known_source_hashes(
+        self,
+        config: PipelineConfig,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Load prior source SHA-256 digests from ``incremental_from_layer``."""
+        if config.incremental_from_layer is None:
+            return {}, {}
+        store = self._get_store(config)
+        if not store.layer_exists(config.incremental_from_layer):
+            raise StorageError(
+                f"Incremental base layer {config.incremental_from_layer!r} does not exist."
+            )
+        prior = store.load_layer(config.incremental_from_layer)
+        known_by_uri = {
+            src.uri: src.content_sha256 for src in prior.sources if src.uri and src.content_sha256
+        }
+        known_by_source_id = {
+            src.source_id: src.content_sha256
+            for src in prior.sources
+            if src.source_id and src.content_sha256
+        }
+        return known_by_uri, known_by_source_id
+
     def ingest(self, config: PipelineConfig) -> list[SourceDocument]:
         """Run stage 1 (Ingestion) and write ``01_ingested.jsonl`` if checkpoints enabled."""
+        known_by_uri, known_by_source_id = self._load_known_source_hashes(config)
+        skipped_unchanged = 0
         docs: list[SourceDocument] = []
         if config.web_crawl is not None:
+            crawl_cfg = config.web_crawl
+            if known_by_uri:
+                merged_hashes = {**known_by_uri, **config.web_crawl.known_hashes}
+                crawl_cfg = config.web_crawl.model_copy(update={"known_hashes": merged_hashes})
             crawler = WebConnector(
-                config.web_crawl,
+                crawl_cfg,
                 transport=self._web_transport,
                 resolver=self._dns_resolver,
             )
             docs.extend(crawler.ingest())
 
         for file_cfg in config.local_files:
-            docs.extend(
-                ingest_local_file(
-                    file_cfg.path,
-                    source_id=file_cfg.source_id,
-                    trust_weight=file_cfg.trust_weight,
-                )
+            file_docs = ingest_local_file(
+                file_cfg.path,
+                source_id=file_cfg.source_id,
+                trust_weight=file_cfg.trust_weight,
             )
+            for doc in file_docs:
+                expected_sha = known_by_uri.get(doc.uri) or known_by_source_id.get(doc.source_id)
+                if expected_sha and expected_sha == doc.content_sha256:
+                    skipped_unchanged += 1
+                    continue
+                docs.append(doc)
 
         if config.checkpoint_dir:
             ckpt = Path(config.checkpoint_dir) / "01_ingested.jsonl"
             write_jsonl_checkpoint(docs, ckpt)
 
-        logger.info("pipeline_ingested", layer_id=config.layer_id, document_count=len(docs))
+        logger.info(
+            "pipeline_ingested",
+            layer_id=config.layer_id,
+            document_count=len(docs),
+            skipped_unchanged=skipped_unchanged,
+            incremental_from_layer=config.incremental_from_layer,
+        )
         return docs
 
     def map_documents(
@@ -166,19 +215,25 @@ class PipelineRunner:
         parent_layer_ids: list[str] | None = None,
     ) -> LayerData:
         """Run stages 3-5 (Resolve, Reduce, Integrity Gate, Store) from mapped batches."""
+        resolved_parents = (
+            list(parent_layer_ids)
+            if parent_layer_ids is not None
+            else ([config.incremental_from_layer] if config.incremental_from_layer else None)
+        )
+        cluster_provider = build_embedding_provider(config)
         reducer = KnowledgeReducer(
             lexical_threshold=config.lexical_threshold,
             semantic_threshold=config.semantic_threshold,
             min_claim_length=config.min_claim_length,
             conflict_strategy=config.conflict_strategy,
-            embedding_provider=build_embedding_provider(config),
+            embedding_provider=cluster_provider,
         )
         layer_data = reducer.reduce_batches(
             batches,
             layer_id=config.layer_id,
             layer_name=config.layer_name,
             tier=LayerTier(config.tier),
-            parent_layer_ids=parent_layer_ids,
+            parent_layer_ids=resolved_parents,
             pipeline_config_hash=config.config_sha256(),
             strict_validation=True,
         )
@@ -190,10 +245,21 @@ class PipelineRunner:
         store = self._get_store(config)
         store.save_layer(layer_data, overwrite=config.overwrite)
 
+        embeddings_indexed = 0
+        if config.build_embeddings_index and layer_data.claims:
+            retrieval_provider = (
+                cluster_provider
+                if config.use_sentence_transformers
+                else build_retrieval_embedding_provider(config)
+            )
+            retriever = HybridGraphRAGRetriever(store, embedding_provider=retrieval_provider)
+            embeddings_indexed = retriever.build_index(config.layer_id)
+
         logger.info(
             "pipeline_reduced",
             layer_id=config.layer_id,
             stats=layer_data.layer.stats,
+            embeddings_indexed=embeddings_indexed,
         )
         return layer_data
 

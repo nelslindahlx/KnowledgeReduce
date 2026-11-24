@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from knowledgereduce.ingest.web import CrawlConfig
 from knowledgereduce.map.structured import StructuredMappingConfig
-from knowledgereduce.models import ConflictStrategy, LayerTier, SchemaValidationError
+from knowledgereduce.models import (
+    ConflictStrategy,
+    LayerTier,
+    SchemaValidationError,
+    validate_layer_id,
+)
 
 
 class LocalFileSourceConfig(BaseModel):
@@ -48,6 +53,15 @@ class PipelineConfig(BaseModel):
     conflict_strategy: ConflictStrategy = ConflictStrategy.PRESERVE_DISPUTE
     max_workers: int = Field(default=1, ge=1, le=32)
     overwrite: bool = False
+    incremental_from_layer: str | None = None
+    build_embeddings_index: bool = True
+
+    @field_validator("incremental_from_layer")
+    @classmethod
+    def _validate_incremental_from_layer(cls, value: str | None) -> str | None:
+        if value is not None:
+            return validate_layer_id(value)
+        return None
 
     def config_sha256(self) -> str:
         """Compute a deterministic hash of this configuration."""
