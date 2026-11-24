@@ -1,2 +1,148 @@
 # KnowledgeReduce
-These are notebooks related to my KnowledgeReduce project
+
+**MapReduce-inspired, conflict-aware framework for building stackable knowledge graphs — persisted in DuckDB + Apache Parquet, queried with NetworkX + Hybrid GraphRAG, and operable directly by AI agents over `stdio` MCP.**
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+---
+
+## Why KnowledgeReduce?
+
+KnowledgeReduce unifies the conceptual architecture from [*KnowledgeReduce: Building Stackable Sets of Knowledge*](docs/paper/paper.tex) with a deterministic, provenance-rich fact and entity-relationship pipeline:
+
+1. **Ingest (`knowledgereduce.ingest`):** SSRF-hardened async web crawler (`httpx`, private-IP blocking, `http`/`https`-only, cached `robots.txt` with timeouts, per-domain rate limiting, `trafilatura` main-content extraction, `content_sha256` change tracking) plus local `CSV`, `JSON`/`JSONL`, `Markdown`, and plain-text connectors.
+2. **Map (`knowledgereduce.map`):** Stateless, parallelizable document mappers (`DeterministicNLPMapper`, declarative `StructuredMapper`, optional batched `SpacyNLPMapper`) plus resumable `02_mapped.jsonl` checkpoints and an agent-in-the-loop MCP hook (`submit_mapped_batch`). Every `Claim` connects to its extracted `Entity` nodes via `MENTIONS` and semantic `Relation` edges.
+3. **Resolve (`knowledgereduce.resolve`):** Sub-quadratic 3-tier deduplication (SHA-256 exact hash → token-blocked `rapidfuzz` → batched L2-normalized embeddings + `AgglomerativeClustering(metric="precomputed")`) with Union-Find entity disambiguation and atomic `entity_id_map` endpoint remapping.
+4. **Reduce (`knowledgereduce.reduce`):** Representative-preserving cluster merging (never destructive deletion), full provenance/alias/tag union, **`PreserveDispute`** default conflict handling (`CONTRADICTS` edges + structured `ConflictRecord`s with `needs_review=True`), and a strict `IntegrityValidator` gate guaranteeing zero dangling edges.
+5. **Store, Stack & Serve (`storage`, `stack`, `query`, `export`, `mcp`):** Immutable columnar Parquet layers queried via DuckDB parameterized SQL, non-destructive `StackManager` set/overlay algebra (`overlay`, `union`, `intersection`, `difference`, `diff_layers`) in a lineage DAG, Hybrid GraphRAG retrieval, lossless sharded JSONL + sanitized GraphML/GEXF exports, Typer CLI (`kr`), and an Antigravity-ready `stdio` MCP server.
+
+---
+
+## Installation
+
+Requires **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
+
+```bash
+# Editable development install with all test/lint tools
+uv sync --extra dev
+
+# Or install directly from GitHub
+pip install "git+https://github.com/nelslindahlx/KnowledgeReduce.git"
+
+# Optional extras
+uv sync --extra nlp         # spaCy batched dependency extraction
+uv sync --extra embeddings  # sentence-transformers embeddings
+uv sync --extra viz         # matplotlib helpers
+```
+
+Verify the installation:
+
+```bash
+uv run kr version
+# knowledgereduce 1.0.0
+```
+
+---
+
+## Python SDK Quickstart
+
+```python
+from pathlib import Path
+from knowledgereduce import (
+    ConflictStrategy,
+    DuckDBParquetStore,
+    HybridGraphRAGRetriever,
+    LocalFileSourceConfig,
+    PipelineConfig,
+    PipelineRunner,
+    StackManager,
+    MergeMode,
+)
+
+config = PipelineConfig(
+    layer_id="civichonors-v1",
+    layer_name="Civic Honors Knowledge Base",
+    store_dir=".kr_store",
+    checkpoint_dir=".kr_checkpoints",
+    local_files=[
+        LocalFileSourceConfig(
+            path="tests/fixtures/civichonors_facts.csv",
+            source_id="csv_curated",
+            trust_weight=0.95,
+        ),
+        LocalFileSourceConfig(
+            path="tests/fixtures/civichonors_notes.json",
+            source_id="json_notes",
+            trust_weight=0.90,
+        ),
+    ],
+    conflict_strategy=ConflictStrategy.PRESERVE_DISPUTE,
+)
+
+layer_data = PipelineRunner().run(config)
+print(layer_data.layer.stats)
+
+# Query with Hybrid GraphRAG (lexical + embedding similarity + k-hop graph expansion)
+store = DuckDBParquetStore(Path(".kr_store"))
+ctx = HybridGraphRAGRetriever(store).retrieve(
+    "civichonors-v1",
+    "When was Civic Honors published?",
+    top_k=3,
+    hops=1,
+)
+for item in ctx.results:
+    print(item.score, item.claim.statement, item.graph_neighbors)
+```
+
+---
+
+## CLI (`kr`) Overview
+
+```bash
+kr version
+kr run pipeline.yaml
+kr ingest --file facts.csv --file notes.json -o checkpoints/01_ingested.jsonl
+kr map -i checkpoints/01_ingested.jsonl -o checkpoints/02_mapped.jsonl --workers 4
+kr reduce --layer-id civic-v1 --name "Civic v1" -i checkpoints/02_mapped.jsonl -s .kr_store
+kr stack --layer civic-v1 --layer civic-patch --target civic-stacked --mode overlay -s .kr_store
+kr diff civic-v1 civic-stacked -s .kr_store
+kr query civic-stacked --query "University of Kansas" --top-k 5 --hops 1 -s .kr_store
+kr export civic-stacked --format sharded_jsonl -o exports/civic_shards -s .kr_store
+kr validate civic-stacked --strict -s .kr_store
+kr mcp --workspace .
+```
+
+---
+
+## Antigravity `stdio` MCP Integration
+
+Start `kr mcp --workspace /path/to/workspace` or register it in Antigravity's `mcp_config.json` (see [docs/mcp_antigravity.md](docs/mcp_antigravity.md) for the complete config and agent-in-the-loop `submit_mapped_batch` workflow). Exposed tools:
+
+- `ingest_source` • `run_local_map` • `submit_mapped_batch` • `resolve_and_reduce`
+- `stack_layers` • `diff_layers` • `query_knowledge_graph`
+- `list_conflicts` • `resolve_conflict` • `export_layer` • `validate_layer`
+
+---
+
+## Documentation & Project Layout
+
+- `src/knowledgereduce/` — Core production package (`models`, `ingest`, `map`, `resolve`, `reduce`, `storage`, `stack`, `query`, `export`, `pipeline`, `mcp`, `cli`).
+- `docs/architecture.md` — Dataflow, Pydantic schemas, Parquet manifest spec, and locked ADRs.
+- `docs/mcp_antigravity.md` — Antigravity `stdio` MCP server configuration and agent workflow.
+- `docs/conflicts_and_benchmarks.md` — Conflict resolution policies and golden/scaling benchmark results.
+- `docs/paper/` — Original preprint paper (*KnowledgeReduce: Building Stackable Sets of Knowledge*, LaTeX + PDF).
+- `examples/` — Offline runnable Python scripts demonstrating pipeline, stacking, conflicts, GraphRAG, and exports.
+- `notebooks/` — Clean, output-stripped notebooks importing `knowledgereduce`.
+- `benchmarks/` — Reproducible 50-document golden evaluation + 1K/10K scaling harness.
+- `legacy/` — Deprecated historical Colab notebooks and 2023–2025 experimental prototypes (excluded from builds and CI; preserved under tag `archive/experiments-2023-2025`).
+
+## Development & Quality Checks
+
+```bash
+uv run ruff check src tests examples benchmarks
+uv run ruff format --check src tests examples benchmarks
+uv run mypy --strict src
+uv run pytest --cov=knowledgereduce --cov-fail-under=85
+uv run python benchmarks/run_benchmark.py --scale 1000 10000
+```
