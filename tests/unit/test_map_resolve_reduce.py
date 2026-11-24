@@ -127,6 +127,52 @@ def test_structured_mapper_preserves_per_row_entity_types_and_predicates() -> No
     assert batch.claims[3].object_id is None
 
 
+def test_structured_mapper_infers_sparse_json_schema_across_all_rows() -> None:
+    import json
+
+    sparse_rows = [
+        {"subject": "Civic Honors", "predicate": "EXTENDS", "object": "Civic Engagement"},
+        {
+            "subject": "Nels Lindahl",
+            "subject_type": "PERSON",
+            "predicate": "STUDIED_AT",
+            "object": "University of Kansas",
+            "object_type": "ORG",
+            "statement": "Nels Lindahl studied at the University of Kansas.",
+            "category": "Biography",
+            "tags": ["ku", "alumni"],
+            "reliability": "VERIFIED",
+        },
+        {
+            "subject": "Civic Honors",
+            "subject_type": "ORG",
+            "predicate": "HAS_CHAPTERS",
+            "object": "12",
+            "object_is_entity": False,
+            "statement": "Civic Honors has 12 chapters.",
+        },
+    ]
+    doc = SourceDocument(
+        source_id="json-sparse",
+        uri="file:///sparse.json",
+        source_type=SourceType.JSON,
+        content=json.dumps(sparse_rows),
+        trust_weight=0.8,
+    )
+    batch = StructuredMapper().map_document(doc)
+    assert len(batch.claims) == 3
+    assert batch.claims[1].category == "Biography"
+    assert batch.claims[1].tags == ["ku", "alumni"]
+    assert batch.claims[1].reliability == ReliabilityRating.VERIFIED
+    assert batch.claims[2].object_literal == "12"
+    assert batch.claims[2].object_id is None
+
+    by_name = {e.canonical_name: e for e in batch.entities}
+    assert by_name["Nels Lindahl"].entity_type == "PERSON"
+    assert by_name["University of Kansas"].entity_type == "ORG"
+    assert "12" not in by_name
+
+
 def test_resolve_entities_merges_variants_and_remaps_endpoints() -> None:
     b1 = MappedBatch(
         source_document=SourceDocument(

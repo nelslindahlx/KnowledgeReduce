@@ -131,6 +131,11 @@ def _parse_records(doc: SourceDocument) -> list[dict[str, Any]]:
     )
 
 
+def _collect_present_fields(rows: Sequence[dict[str, Any]]) -> set[str]:
+    """Collect the union of column/key names across all records in *rows*."""
+    return {str(k) for row in rows for k in row}
+
+
 class StructuredMapper:
     """Maps structured CSV/JSON/JSONL rows into grounded entities, claims, and relations."""
 
@@ -139,50 +144,51 @@ class StructuredMapper:
     def __init__(self, config: StructuredMappingConfig | None = None) -> None:
         self.config = config
 
-    def _effective_config(self, sample_row: dict[str, Any]) -> StructuredMappingConfig:
+    def _effective_config(self, rows: Sequence[dict[str, Any]]) -> StructuredMappingConfig:
         if self.config is not None:
             return self.config
+        present = _collect_present_fields(rows)
         entities: list[EntityMappingRule] = []
-        if "subject" in sample_row:
+        if "subject" in present:
             entities.append(
                 EntityMappingRule(
                     name_field="subject",
                     entity_type="CONCEPT",
-                    entity_type_field="subject_type" if "subject_type" in sample_row else None,
+                    entity_type_field="subject_type" if "subject_type" in present else None,
                 )
             )
-        if "object" in sample_row:
+        if "object" in present:
             entities.append(
                 EntityMappingRule(
                     name_field="object",
                     entity_type="CONCEPT",
-                    entity_type_field="object_type" if "object_type" in sample_row else None,
+                    entity_type_field="object_type" if "object_type" in present else None,
                 )
             )
         relations: list[RelationMappingRule] = []
-        if "subject" in sample_row and "object" in sample_row and "predicate" in sample_row:
+        if "subject" in present and "object" in present and "predicate" in present:
             relations.append(
                 RelationMappingRule(
                     source_name_field="subject",
                     source_type="CONCEPT",
-                    source_type_field="subject_type" if "subject_type" in sample_row else None,
+                    source_type_field="subject_type" if "subject_type" in present else None,
                     target_name_field="object",
                     target_type="CONCEPT",
-                    target_type_field="object_type" if "object_type" in sample_row else None,
+                    target_type_field="object_type" if "object_type" in present else None,
                     relation_type="RELATED_TO",
-                    relation_type_field="predicate" if "predicate" in sample_row else None,
+                    relation_type_field="predicate" if "predicate" in present else None,
                 )
             )
         return StructuredMappingConfig(
             entities=entities,
             relations=relations,
-            statement_field="statement" if "statement" in sample_row else None,
-            category_field="category" if "category" in sample_row else None,
-            tags_field="tags" if "tags" in sample_row else None,
-            reliability_field="reliability" if "reliability" in sample_row else None,
-            subject_field="subject" if "subject" in sample_row else None,
-            predicate_field="predicate" if "predicate" in sample_row else None,
-            object_field="object" if "object" in sample_row else None,
+            statement_field="statement" if "statement" in present else None,
+            category_field="category" if "category" in present else None,
+            tags_field="tags" if "tags" in present else None,
+            reliability_field="reliability" if "reliability" in present else None,
+            subject_field="subject" if "subject" in present else None,
+            predicate_field="predicate" if "predicate" in present else None,
+            object_field="object" if "object" in present else None,
         )
 
     def map_document(self, doc: SourceDocument) -> MappedBatch:
@@ -191,7 +197,7 @@ class StructuredMapper:
         if not rows:
             return MappedBatch(source_document=doc)
 
-        cfg = self._effective_config(rows[0])
+        cfg = self._effective_config(rows)
         entities_by_id: dict[str, Entity] = {}
         claims: list[Claim] = []
         relations_by_id: dict[str, Relation] = {}
