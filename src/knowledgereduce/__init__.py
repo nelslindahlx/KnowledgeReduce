@@ -28,7 +28,7 @@ from knowledgereduce.query import (
     detect_communities,
     k_hop_neighborhood,
 )
-from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer
+from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, adjudicate_conflict
 from knowledgereduce.resolve import HashingEmbeddingProvider
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
@@ -65,6 +65,7 @@ __all__ = [
     "StackManager",
     "ValidationReport",
     "__version__",
+    "adjudicate_conflict",
     "app",
     "bounded_shortest_path",
     "central_nodes",

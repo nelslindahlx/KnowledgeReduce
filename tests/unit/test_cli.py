@@ -198,3 +198,104 @@ local_files:
     )
     assert bad_mapper.exit_code == 1
     assert "Error:" in bad_mapper.output
+
+    empty_ingest = runner.invoke(app, ["ingest", "--output", str(tmp_path / "empty_out.jsonl")])
+    assert empty_ingest.exit_code == 1
+    assert "Error:" in empty_ingest.output
+
+
+def test_cli_conflicts_resolve_conflict_and_stack_reconcile(tmp_path: Path) -> None:
+    runner = CliRunner()
+    store_dir = tmp_path / "store"
+    file_a = tmp_path / "a.csv"
+    file_b = tmp_path / "b.csv"
+    file_a.write_text(
+        "subject,subject_type,predicate,object,object_type,statement,reliability\n"
+        'Civic Honors,ORG,PUBLISHED_IN,2006,DATE,"Civic Honors was published in 2006.",VERIFIED\n',
+        encoding="utf-8",
+    )
+    file_b.write_text(
+        "subject,subject_type,predicate,object,object_type,statement,reliability\n"
+        'Civic Honors,ORG,PUBLISHED_IN,2020,DATE,"Civic Honors was published in 2020.",UNVERIFIED\n',
+        encoding="utf-8",
+    )
+
+    for tag, csv_file in [("a", file_a), ("b", file_b)]:
+        ing = tmp_path / f"{tag}_ing.jsonl"
+        mp = tmp_path / f"{tag}_map.jsonl"
+        assert runner.invoke(app, ["ingest", "-f", str(csv_file), "-o", str(ing)]).exit_code == 0
+        assert runner.invoke(app, ["map", "-i", str(ing), "-o", str(mp)]).exit_code == 0
+        assert (
+            runner.invoke(
+                app,
+                [
+                    "reduce",
+                    "--layer-id",
+                    f"layer-{tag}",
+                    "--name",
+                    tag,
+                    "-i",
+                    str(mp),
+                    "-s",
+                    str(store_dir),
+                ],
+            ).exit_code
+            == 0
+        )
+
+    res_stack = runner.invoke(
+        app,
+        [
+            "stack",
+            "--layer",
+            "layer-a",
+            "--layer",
+            "layer-b",
+            "--target",
+            "stacked-rec",
+            "--mode",
+            "union",
+            "--reconcile",
+            "-s",
+            str(store_dir),
+        ],
+    )
+    assert res_stack.exit_code == 0, res_stack.output
+
+    res_list = runner.invoke(app, ["conflicts", "stacked-rec", "-s", str(store_dir)])
+    assert res_list.exit_code == 0, res_list.output
+    listed = json.loads(res_list.stdout)
+    assert listed["count"] == 1
+    cf_id = listed["conflicts"][0]["conflict_id"]
+
+    res_adj = runner.invoke(
+        app,
+        [
+            "resolve-conflict",
+            "stacked-rec",
+            "--conflict-id",
+            cf_id,
+            "--target",
+            "stacked-curated",
+            "--winning-value",
+            "2006",
+            "--notes",
+            "CLI adjudication verified",
+            "-s",
+            str(store_dir),
+        ],
+    )
+    assert res_adj.exit_code == 0, res_adj.output
+    adj_payload = json.loads(res_adj.stdout)
+    assert adj_payload["resolved_conflict"]["needs_review"] is False
+    assert adj_payload["layer"]["tier"] == "curated"
+
+    res_open_after = runner.invoke(app, ["conflicts", "stacked-curated", "-s", str(store_dir)])
+    assert res_open_after.exit_code == 0
+    assert json.loads(res_open_after.stdout)["count"] == 0
+
+    res_all_after = runner.invoke(
+        app, ["conflicts", "stacked-curated", "--all", "-s", str(store_dir)]
+    )
+    assert res_all_after.exit_code == 0
+    assert json.loads(res_all_after.stdout)["count"] == 1

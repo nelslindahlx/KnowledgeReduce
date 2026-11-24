@@ -31,22 +31,18 @@ from knowledgereduce.map import (
     save_mapped_batches,
 )
 from knowledgereduce.models import (
-    ConflictResolutionError,
     ConflictStrategy,
-    KnowledgeLayer,
     KnowledgeReduceError,
-    LayerData,
     LayerTier,
     MappedBatch,
     MergeMode,
     ReliabilityRating,
     SourceDocument,
     StorageError,
-    utc_now,
 )
 from knowledgereduce.pipeline import PipelineConfig, PipelineRunner
 from knowledgereduce.query import HybridGraphRAGRetriever, QueryBuilder
-from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer
+from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, adjudicate_conflict
 from knowledgereduce.security import ResolverFn, ensure_within_base
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore
@@ -341,71 +337,17 @@ def create_mcp_server(
     ) -> dict[str, Any]:
         """Adjudicate a conflict non-destructively into a new CURATED child layer."""
         base_data = store.load_layer(base_layer_id)
-        target_conflict = next(
-            (cf for cf in base_data.conflicts if cf.conflict_id == conflict_id),
-            None,
+        curated, updated_conflict = adjudicate_conflict(
+            base_data,
+            conflict_id=conflict_id,
+            target_layer_id=target_layer_id,
+            winning_value=winning_value,
+            winning_source_id=winning_source_id,
+            resolution_notes=resolution_notes or "Adjudicated via MCP resolve_conflict.",
         )
-        if target_conflict is None:
-            raise ConflictResolutionError(
-                f"Conflict {conflict_id!r} not found in layer {base_layer_id!r}."
-            )
-
-        participating_claim_ids = {
-            str(cid) for cand in target_conflict.candidates for cid in (cand.get("claim_ids") or [])
-        }
-        updated_conflict = target_conflict.model_copy(
-            update={
-                "winning_value": winning_value,
-                "winning_source_id": winning_source_id or target_conflict.winning_source_id,
-                "needs_review": False,
-                "resolved_at": utc_now(),
-                "resolution_notes": resolution_notes or "Adjudicated via MCP resolve_conflict.",
-            }
-        )
-
-        updated_conflicts = [
-            updated_conflict if cf.conflict_id == conflict_id else cf for cf in base_data.conflicts
-        ]
-        updated_claims = [
-            clm.model_copy(update={"needs_review": False})
-            if clm.claim_id in participating_claim_ids
-            else clm
-            for clm in base_data.claims
-        ]
-        updated_relations = [
-            rel
-            for rel in base_data.relations
-            if not (
-                rel.relation_type == "CONTRADICTS"
-                and rel.source_id in participating_claim_ids
-                and rel.target_id in participating_claim_ids
-            )
-        ]
-
-        new_layer = KnowledgeLayer(
-            layer_id=target_layer_id,
-            name=f"{base_data.layer.name} (Adjudicated)",
-            tier=LayerTier.CURATED,
-            parent_layer_ids=[base_layer_id],
-            created_at=utc_now(),
-            stats={
-                **base_data.layer.stats,
-                "open_conflicts": sum(1 for cf in updated_conflicts if cf.needs_review),
-                "resolved_conflict_id": conflict_id,
-            },
-        )
-        curated = LayerData(
-            layer=new_layer,
-            sources=base_data.sources,
-            entities=base_data.entities,
-            claims=updated_claims,
-            relations=updated_relations,
-            conflicts=updated_conflicts,
-        )
-        validator.validate(curated, strict=True)
         store.save_layer(curated, overwrite=overwrite)
         return {
-            "layer": new_layer.model_dump(mode="json"),
+            "layer": curated.layer.model_dump(mode="json"),
             "resolved_conflict": updated_conflict.model_dump(mode="json"),
         }
 

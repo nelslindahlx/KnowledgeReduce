@@ -2,6 +2,7 @@
 
 from knowledgereduce.reduce.conflicts import (
     DEFAULT_FUNCTIONAL_PREDICATES,
+    adjudicate_conflict,
     is_functional_predicate,
     resolve_claim_conflicts,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "DEFAULT_FUNCTIONAL_PREDICATES",
     "IntegrityValidator",
     "KnowledgeReducer",
+    "adjudicate_conflict",
     "is_functional_predicate",
     "resolve_claim_conflicts",
 ]

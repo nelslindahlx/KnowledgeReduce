@@ -29,6 +29,7 @@ from knowledgereduce.map import load_mapped_batches, save_mapped_batches
 from knowledgereduce.mcp import create_mcp_server
 from knowledgereduce.models import (
     ConflictStrategy,
+    IngestionError,
     KnowledgeReduceError,
     LayerTier,
     MergeMode,
@@ -37,7 +38,7 @@ from knowledgereduce.models import (
 )
 from knowledgereduce.pipeline import LocalFileSourceConfig, PipelineConfig, PipelineRunner
 from knowledgereduce.query import HybridGraphRAGRetriever, QueryBuilder
-from knowledgereduce.reduce import IntegrityValidator
+from knowledgereduce.reduce import IntegrityValidator, adjudicate_conflict
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore
 
@@ -105,6 +106,8 @@ def ingest_command(
 ) -> None:
     """Ingest local files and/or web pages into a JSONL checkpoint."""
     try:
+        if not files and not urls:
+            raise IngestionError("Provide at least one --file or --url input to ingest.")
         docs: list[SourceDocument] = []
         if urls:
             docs.extend(
@@ -348,6 +351,80 @@ def validate_command(
         typer.echo(report.model_dump_json(indent=2))
         if strict and not report.valid:
             raise typer.Exit(code=1)
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("conflicts")
+def conflicts_command(
+    layer_id: str = typer.Argument(..., help="Layer ID to inspect."),
+    show_all: bool = typer.Option(False, "--all", help="Include already adjudicated conflicts."),
+    limit: int = typer.Option(100, "--limit", help="Maximum conflicts to return."),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """List preserved or adjudicated conflicts in a stored layer."""
+    try:
+        store = DuckDBParquetStore(store_dir)
+        conflicts = store.list_conflicts(
+            layer_id,
+            needs_review=None if show_all else True,
+            limit=limit,
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "layer_id": layer_id,
+                    "count": len(conflicts),
+                    "conflicts": [cf.model_dump(mode="json") for cf in conflicts],
+                },
+                indent=2,
+            )
+        )
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("resolve-conflict")
+def resolve_conflict_command(
+    base_layer_id: str = typer.Argument(..., help="Base layer ID containing the conflict."),
+    conflict_id: str = typer.Option(..., "--conflict-id", help="Conflict ID to adjudicate."),
+    target_layer_id: str = typer.Option(
+        ..., "--target", "-t", help="Target CURATED child layer ID."
+    ),
+    winning_value: str = typer.Option(..., "--winning-value", help="Adjudicated canonical value."),
+    winning_source_id: str | None = typer.Option(None, "--winning-source-id"),
+    notes: str = typer.Option("", "--notes", help="Adjudication rationale notes."),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Adjudicate a conflict non-destructively into a new CURATED child layer."""
+    try:
+        store = DuckDBParquetStore(store_dir)
+        base_data = store.load_layer(base_layer_id)
+        curated, updated_conflict = adjudicate_conflict(
+            base_data,
+            conflict_id=conflict_id,
+            target_layer_id=target_layer_id,
+            winning_value=winning_value,
+            winning_source_id=winning_source_id,
+            resolution_notes=notes or "Adjudicated via CLI resolve-conflict.",
+        )
+        store.save_layer(curated, overwrite=overwrite)
+        typer.echo(
+            json.dumps(
+                {
+                    "layer": curated.layer.model_dump(mode="json"),
+                    "resolved_conflict": updated_conflict.model_dump(mode="json"),
+                },
+                indent=2,
+            )
+        )
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc

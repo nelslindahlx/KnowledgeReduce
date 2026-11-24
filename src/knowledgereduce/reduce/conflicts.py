@@ -4,15 +4,22 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import Any
 
 from knowledgereduce.map.base import deterministic_id
 from knowledgereduce.models import (
     Claim,
     ConflictRecord,
+    ConflictResolutionError,
     ConflictStrategy,
     Evidence,
+    KnowledgeLayer,
+    LayerData,
+    LayerTier,
     Relation,
+    utc_now,
 )
+from knowledgereduce.reduce.validator import IntegrityValidator
 
 DEFAULT_FUNCTIONAL_PREDICATES: frozenset[str] = frozenset(
     {
@@ -220,3 +227,79 @@ def resolve_claim_conflicts(
         )
 
     return final_claims, contradiction_relations, conflicts
+
+
+def adjudicate_conflict(
+    base_data: LayerData,
+    *,
+    conflict_id: str,
+    target_layer_id: str,
+    winning_value: Any,
+    winning_source_id: str | None = None,
+    resolution_notes: str = "",
+) -> tuple[LayerData, ConflictRecord]:
+    """Adjudicate *conflict_id* non-destructively into a new ``CURATED`` child layer."""
+    target_conflict = next(
+        (cf for cf in base_data.conflicts if cf.conflict_id == conflict_id),
+        None,
+    )
+    if target_conflict is None:
+        raise ConflictResolutionError(
+            f"Conflict {conflict_id!r} not found in layer {base_data.layer.layer_id!r}."
+        )
+
+    participating_claim_ids = {
+        str(cid) for cand in target_conflict.candidates for cid in (cand.get("claim_ids") or [])
+    }
+    updated_conflict = target_conflict.model_copy(
+        update={
+            "winning_value": winning_value,
+            "winning_source_id": winning_source_id or target_conflict.winning_source_id,
+            "needs_review": False,
+            "resolved_at": utc_now(),
+            "resolution_notes": resolution_notes or "Adjudicated via resolve_conflict.",
+        }
+    )
+
+    updated_conflicts = [
+        updated_conflict if cf.conflict_id == conflict_id else cf for cf in base_data.conflicts
+    ]
+    updated_claims = [
+        clm.model_copy(update={"needs_review": False})
+        if clm.claim_id in participating_claim_ids
+        else clm
+        for clm in base_data.claims
+    ]
+    updated_relations = [
+        rel
+        for rel in base_data.relations
+        if not (
+            rel.relation_type == "CONTRADICTS"
+            and rel.source_id in participating_claim_ids
+            and rel.target_id in participating_claim_ids
+        )
+    ]
+
+    new_layer = KnowledgeLayer(
+        layer_id=target_layer_id,
+        name=f"{base_data.layer.name} (Adjudicated)",
+        tier=LayerTier.CURATED,
+        parent_layer_ids=[base_data.layer.layer_id],
+        created_at=utc_now(),
+        stats={
+            **base_data.layer.stats,
+            "relations": len(updated_relations),
+            "open_conflicts": sum(1 for cf in updated_conflicts if cf.needs_review),
+            "resolved_conflict_id": conflict_id,
+        },
+    )
+    curated = LayerData(
+        layer=new_layer,
+        sources=base_data.sources,
+        entities=base_data.entities,
+        claims=updated_claims,
+        relations=updated_relations,
+        conflicts=updated_conflicts,
+    )
+    IntegrityValidator().validate(curated, strict=True)
+    return curated, updated_conflict
