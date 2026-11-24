@@ -1,0 +1,24 @@
+[
+  {
+    "subject": "KnowledgeReduce",
+    "subject_type": "CONCEPT",
+    "predicate": "EXTENDS",
+    "object": "MapReduce",
+    "object_type": "CONCEPT",
+    "statement": "KnowledgeReduce extends MapReduce to build stackable sets of knowledge.",
+    "category": "Architecture",
+    "tags": ["mapreduce", "knowledge-graph"],
+    "reliability": "VERIFIED"
+  },
+  {
+    "subject": "Civic Honors",
+    "subject_type": "ORG",
+    "predicate": "PUBLISHED_IN",
+    "object": "2006",
+    "object_type": "DATE",
+    "statement": "Civic Honors was originally published in print in 2006.",
+    "category": "Publication",
+    "tags": ["civic"],
+    "reliability": "VERIFIED"
+  }
+]

@@ -1,0 +1,4 @@
+subject,subject_type,predicate,object,object_type,statement,category,tags,reliability
+Civic Honors,ORG,PUBLISHED_IN,2006,DATE,Civic Honors was published in 2006.,Publication,"civic,history",VERIFIED
+Nels Lindahl,PERSON,AFFILIATED_WITH,University of Kansas,ORG,Nels Lindahl studied at the University of Kansas.,Biography,"ku,alumni",LIKELY_TRUE
+University of Kansas,ORG,LOCATED_IN,Lawrence,GPE,The University of Kansas is located in Lawrence.,Geography,"kansas,education",VERIFIED

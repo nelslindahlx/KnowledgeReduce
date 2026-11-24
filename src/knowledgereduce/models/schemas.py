@@ -216,7 +216,8 @@ class Claim(BaseModel):
     def _check_utc_optional(cls, value: datetime | None) -> datetime | None:
         return _normalize_utc(value) if value is not None else None
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def quality_score(self) -> float:
         """Return bounded deterministic quality score in [0.0, 100.0]."""
         reliability_pts = (int(self.reliability) / 4.0) * 50.0
