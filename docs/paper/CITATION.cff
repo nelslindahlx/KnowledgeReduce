@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use KnowledgeReduce in your research, please cite the paper and software below."
+authors:
+  - family-names: "Lindahl"
+    given-names: "Nels"
+    orcid: "https://orcid.org/0000-0002-1855-6096"
+title: "KnowledgeReduce: Building Stackable Sets of Knowledge"
+version: "1.0.0"
+date-released: 2023-12-12
+license: "MIT"
+repository-code: "https://github.com/nelslindahlx/KnowledgeReduce"
+url: "https://github.com/nelslindahlx/KnowledgeReduce"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Lindahl"
+      given-names: "Nels"
+      orcid: "https://orcid.org/0000-0002-1855-6096"
+  title: "KnowledgeReduce: Building Stackable Sets of Knowledge"
+  year: 2023
+  url: "https://github.com/nelslindahlx/KnowledgeReduce/tree/main/docs/paper"

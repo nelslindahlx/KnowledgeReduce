@@ -1,0 +1,153 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "knowledgereduce"
+version = "1.0.0"
+description = "MapReduce-inspired framework for building stackable, conflict-aware knowledge graphs backed by DuckDB and Parquet."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Nels Lindahl", email = "nelsl@nelslindahl.com" },
+]
+keywords = [
+  "knowledge-graph",
+  "mapreduce",
+  "duckdb",
+  "parquet",
+  "graphrag",
+  "mcp",
+  "nlp",
+  "entity-resolution",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+dependencies = [
+  "pydantic>=2.7,<3",
+  "networkx>=3.4,<4",
+  "duckdb>=1.1,<2",
+  "pyarrow>=16.0",
+  "httpx>=0.27,<1",
+  "trafilatura>=1.12",
+  "beautifulsoup4>=4.12",
+  "rapidfuzz>=3.9,<4",
+  "typer>=0.12,<1",
+  "structlog>=24.1",
+  "pyyaml>=6.0",
+  "mcp>=1.2",
+  "numpy>=1.26",
+  "scikit-learn>=1.5",
+]
+
+[project.optional-dependencies]
+nlp = ["spacy>=3.7,<4"]
+embeddings = ["sentence-transformers>=3.0"]
+viz = ["matplotlib>=3.9"]
+dev = [
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6.100",
+  "respx>=0.21",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "types-PyYAML",
+  "nbformat>=5.10",
+  "nbstripout>=0.7",
+  "pip-audit>=2.7",
+]
+
+[project.scripts]
+kr = "knowledgereduce.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/nelslindahlx/KnowledgeReduce"
+Repository = "https://github.com/nelslindahlx/KnowledgeReduce"
+Issues = "https://github.com/nelslindahlx/KnowledgeReduce/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knowledgereduce"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "legacy/**",
+  ".venv/**",
+  ".git/**",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "I",
+  "B",
+  "UP",
+  "S",
+  "SIM",
+  "RUF",
+]
+ignore = [
+  "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+"benchmarks/**/*.py" = ["S101", "S311"]
+"examples/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+exclude = ["^legacy/"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+  "trafilatura.*",
+  "rapidfuzz.*",
+  "sklearn.*",
+  "spacy.*",
+  "sentence_transformers.*",
+  "pyarrow.*",
+  "duckdb.*",
+  "networkx.*",
+  "bs4.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["src/knowledgereduce"]
+omit = ["legacy/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]

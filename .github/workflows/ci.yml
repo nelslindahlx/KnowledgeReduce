@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-and-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python-version }} --extra dev
+
+      - name: Lint with ruff
+        run: uv run --python ${{ matrix.python-version }} ruff check src tests examples benchmarks
+
+      - name: Check formatting with ruff
+        run: uv run --python ${{ matrix.python-version }} ruff format --check src tests examples benchmarks
+
+      - name: Type check with mypy
+        run: uv run --python ${{ matrix.python-version }} mypy --strict src
+
+      - name: Run pytest with coverage gate
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest \
+            --cov=knowledgereduce \
+            --cov-report=term-missing \
+            --cov-fail-under=85
+
+      - name: Run offline examples
+        if: matrix.python-version == '3.12'
+        run: |
+          for script in examples/*.py; do
+            uv run --python ${{ matrix.python-version }} python "$script"
+          done
+
+      - name: Run offline golden & scaling benchmark
+        if: matrix.python-version == '3.12'
+        run: uv run --python ${{ matrix.python-version }} python benchmarks/run_benchmark.py --scale 1000
