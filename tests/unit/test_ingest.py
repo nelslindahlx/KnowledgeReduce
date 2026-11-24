@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 from pathlib import Path
 
@@ -203,3 +204,74 @@ def test_extract_main_text_handles_plain_fallback() -> None:
     text, _ = extract_main_text("<html><body><div>Raw prose block.</div></body></html>")
     assert hashlib.sha256(text.encode()).hexdigest()
     assert "Raw prose block." in text
+
+
+async def test_web_crawler_handles_gzip_compressed_responses_and_http_errors() -> None:
+    robots_gz = gzip.compress(b"User-agent: *\nAllow: /\n")
+    html_gz = gzip.compress(
+        b"<html><head><title>Gzip Page</title></head>"
+        b"<body><main><p>Gzipped civic content works cleanly.</p></main></body></html>"
+    )
+
+    def gzip_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(
+                200,
+                headers={
+                    "content-type": "text/plain",
+                    "content-encoding": "gzip",
+                    "content-length": str(len(robots_gz)),
+                },
+                stream=httpx.ByteStream(robots_gz),
+            )
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/html; charset=utf-8",
+                "content-encoding": "gzip",
+                "content-length": str(len(html_gz)),
+            },
+            stream=httpx.ByteStream(html_gz),
+        )
+
+    cfg = CrawlConfig(
+        seed_urls=["https://civichonors.com/p/the-book"],
+        max_depth=0,
+        rate_limit_seconds=0.0,
+        respect_robots=True,
+    )
+    crawler = AsyncWebCrawler(
+        cfg, transport=httpx.MockTransport(gzip_handler), resolver=_public_dns
+    )
+    docs = await crawler.crawl()
+    assert len(docs) == 1
+    assert docs[0].title == "Gzip Page"
+    assert "Gzipped civic content works cleanly." in docs[0].content
+
+    def connect_error_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection reset", request=request)
+
+    cfg_no_robots = CrawlConfig(
+        seed_urls=["https://civichonors.com/p/the-book"],
+        max_depth=0,
+        rate_limit_seconds=0.0,
+        respect_robots=False,
+    )
+    failing_connect = AsyncWebCrawler(
+        cfg_no_robots,
+        transport=httpx.MockTransport(connect_error_handler),
+        resolver=_public_dns,
+    )
+    with pytest.raises(IngestionError, match="HTTP error fetching"):
+        await failing_connect.crawl()
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    failing_timeout = AsyncWebCrawler(
+        cfg_no_robots,
+        transport=httpx.MockTransport(timeout_handler),
+        resolver=_public_dns,
+    )
+    with pytest.raises(IngestionError, match="HTTP error fetching"):
+        await failing_timeout.crawl()

@@ -187,33 +187,46 @@ class AsyncWebCrawler:
             domain = parsed.hostname or ""
             await self._rate_limit_domain(domain)
 
-            async with client.stream("GET", current, follow_redirects=False) as response:
-                if 300 <= response.status_code < 400 and "location" in response.headers:
-                    next_url = urljoin(current, response.headers["location"])
-                    current = validate_url_safe(
-                        next_url,
-                        allow_private_ips=self.config.allow_private_ips,
-                        resolver=self._resolver,
-                    )
-                    continue
-
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > self.config.max_response_bytes:
-                        raise IngestionError(
-                            f"Response from {current!r} exceeded max_response_bytes "
-                            f"({self.config.max_response_bytes})."
+            try:
+                async with client.stream("GET", current, follow_redirects=False) as response:
+                    if 300 <= response.status_code < 400 and "location" in response.headers:
+                        next_url = urljoin(current, response.headers["location"])
+                        current = validate_url_safe(
+                            next_url,
+                            allow_private_ips=self.config.allow_private_ips,
+                            resolver=self._resolver,
                         )
-                    chunks.append(chunk)
-                raw_body = b"".join(chunks)
-                return httpx.Response(
-                    status_code=response.status_code,
-                    headers=response.headers,
-                    content=raw_body,
-                    request=httpx.Request("GET", current),
-                )
+                        continue
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > self.config.max_response_bytes:
+                            raise IngestionError(
+                                f"Response from {current!r} exceeded max_response_bytes "
+                                f"({self.config.max_response_bytes})."
+                            )
+                        chunks.append(chunk)
+                    raw_body = b"".join(chunks)
+                    # aiter_bytes() already decodes content/transfer encodings;
+                    # strip framing/encoding headers so httpx.Response won't double-decode.
+                    stripped_headers = {"content-encoding", "content-length", "transfer-encoding"}
+                    decoded_headers = httpx.Headers(
+                        [
+                            (k, v)
+                            for k, v in response.headers.multi_items()
+                            if k.lower() not in stripped_headers
+                        ]
+                    )
+                    return httpx.Response(
+                        status_code=response.status_code,
+                        headers=decoded_headers,
+                        content=raw_body,
+                        request=httpx.Request("GET", current),
+                    )
+            except httpx.HTTPError as exc:
+                raise IngestionError(f"HTTP error fetching {current!r}: {exc}") from exc
 
         raise IngestionError(f"Exceeded maximum redirects ({max_redirects}) for {url!r}.")
 
