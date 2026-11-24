@@ -1729,7 +1729,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.9" },
-    { name = "mcp", specifier = ">=1.2" },
+    { name = "mcp", specifier = ">=2.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "nbformat", marker = "extra == 'dev'", specifier = ">=5.10" },
     { name = "nbstripout", marker = "extra == 'dev'", specifier = ">=0.7" },
