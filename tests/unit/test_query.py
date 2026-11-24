@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -26,7 +27,8 @@ from knowledgereduce.query import (
     detect_communities,
     k_hop_neighborhood,
 )
-from knowledgereduce.storage import MemoryGraphStore
+from knowledgereduce.resolve import TfidfSVDProvider
+from knowledgereduce.storage import DuckDBParquetStore, MemoryGraphStore
 
 
 def _seed_query_store() -> MemoryGraphStore:
@@ -199,3 +201,29 @@ def test_hybrid_graphrag_induced_entity_edge_attribution() -> None:
             "target_id": "e_law",
         }
     ]
+
+
+def test_hybrid_graphrag_persists_index_in_duckdb_and_supports_tfidf_fallback(
+    tmp_path: Path,
+) -> None:
+    seed_mem = _seed_query_store()
+    data = seed_mem.load_layer("q1")
+    duck = DuckDBParquetStore(tmp_path)
+    duck.save_layer(data)
+
+    retriever = HybridGraphRAGRetriever(duck)
+    assert retriever.build_index("q1") == 2
+    emb_path = tmp_path / "layers" / "q1" / "claim_embeddings.parquet"
+    assert emb_path.is_file()
+
+    # Warm query uses cached index + DuckDB subgraph extraction without loading full layer.
+    ctx = retriever.retrieve("q1", "Civic Honors community", top_k=1, hops=1)
+    assert [r.claim.claim_id for r in ctx.results] == ["c1"]
+    assert {e.entity_id for e in ctx.related_entities} == {"e1", "e2"}
+    assert [cf.conflict_id for cf in ctx.conflicts] == ["cf1"]
+
+    # Stateful TfidfSVDProvider still works transparently without writing index files.
+    tfidf_retriever = HybridGraphRAGRetriever(duck, embedding_provider=TfidfSVDProvider())
+    assert tfidf_retriever.build_index("q1") == 0
+    ctx_tfidf = tfidf_retriever.retrieve("q1", "University of Kansas", top_k=1, hops=1)
+    assert [r.claim.claim_id for r in ctx_tfidf.results] == ["c2"]

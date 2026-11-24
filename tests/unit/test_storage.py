@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from knowledgereduce.models import (
@@ -200,3 +201,65 @@ def test_duckdb_store_writes_manifest_and_rejects_bad_layer_id(tmp_path: Path) -
 
     with pytest.raises(StorageError):
         store.load_layer("../escape")
+
+
+def test_store_embeddings_lexical_ids_and_k_hop_subgraph(store: GraphStore) -> None:
+    sample = _make_sample_layer("vec-layer")
+    store.save_layer(sample)
+
+    texts = store.list_claim_texts("vec-layer")
+    assert dict(texts) == {
+        "clm-1": "Civic Honors was published in 2006.",
+        "clm-2": "The moon orbits Earth.",
+    }
+    assert store.load_claim_embeddings("vec-layer", model_id="h1") is None
+
+    vecs = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float32)
+    store.save_claim_embeddings("vec-layer", ["clm-1", "clm-2"], vecs, model_id="h1")
+    loaded = store.load_claim_embeddings("vec-layer", model_id="h1")
+    assert loaded is not None
+    assert loaded[0] == ["clm-1", "clm-2"]
+    assert np.allclose(loaded[1], vecs)
+    assert store.load_claim_embeddings("vec-layer", model_id="different-model") is None
+
+    with pytest.raises(StorageError, match="mismatch"):
+        store.save_claim_embeddings("vec-layer", ["clm-1"], vecs, model_id="h1")
+
+    lex_hits = store.search_claims_lexical("vec-layer", "published 2006", limit=10)
+    assert [c.claim_id for c in lex_hits] == ["clm-1", "clm-2"]
+
+    verified_hits = store.search_claims_lexical(
+        "vec-layer", "moon", min_reliability=ReliabilityRating.VERIFIED
+    )
+    assert [c.claim_id for c in verified_hits] == ["clm-1"]
+
+    by_ids = store.get_claims_by_ids("vec-layer", ["clm-2", "missing", "clm-1"])
+    assert [c.claim_id for c in by_ids] == ["clm-2", "clm-1"]
+    assert store.get_claims_by_ids("vec-layer", []) == []
+
+    sub_g, sub_ents, _ = store.get_k_hop_subgraph("vec-layer", ["ent-nels"], hops=1)
+    assert {e.entity_id for e in sub_ents} == {"ent-nels", "ent-ch"}
+    assert sub_g.number_of_edges() == 2
+
+    zero_g, zero_ents, zero_cfs = store.get_k_hop_subgraph("vec-layer", ["clm-2"], hops=0)
+    assert zero_g.number_of_edges() == 0
+    assert zero_ents == []
+    assert [cf.conflict_id for cf in zero_cfs] == ["cf-1"]
+
+    empty_g, _, _ = store.get_k_hop_subgraph("vec-layer", [], hops=1)
+    assert empty_g.number_of_nodes() == 0
+
+
+def test_duckdb_embedding_parquet_lifecycle(tmp_path: Path) -> None:
+    store = DuckDBParquetStore(tmp_path)
+    sample = _make_sample_layer("emb-life")
+    store.save_layer(sample)
+    vecs = np.array([[0.6, 0.8], [0.8, 0.6]], dtype=np.float32)
+    store.save_claim_embeddings("emb-life", ["clm-1", "clm-2"], vecs, model_id="m1")
+    emb_pq = tmp_path / "layers" / "emb-life" / "claim_embeddings.parquet"
+    assert emb_pq.is_file()
+
+    # Re-saving layer cleanly removes stale embeddings index.
+    store.save_layer(sample, overwrite=True)
+    assert not emb_pq.is_file()
+    assert store.load_claim_embeddings("emb-life", model_id="m1") is None

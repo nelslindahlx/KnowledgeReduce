@@ -8,7 +8,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
 
 from knowledgereduce.models import ExtractionError
 
@@ -36,6 +36,9 @@ class EmbeddingProvider(Protocol):
 class TfidfSVDProvider:
     """Offline scikit-learn TF-IDF + TruncatedSVD embedding provider."""
 
+    is_stateless: bool = False
+    model_id: str = "tfidf-svd"
+
     def __init__(self, n_components: int = 128) -> None:
         self.n_components = n_components
 
@@ -61,13 +64,54 @@ class TfidfSVDProvider:
         return _l2_normalize(sparse.toarray())
 
 
+class HashingEmbeddingProvider:
+    """Stateless, deterministic L2-normalized HashingVectorizer embedding provider."""
+
+    is_stateless: bool = True
+
+    def __init__(
+        self,
+        n_features: int = 256,
+        ngram_range: tuple[int, int] = (1, 2),
+    ) -> None:
+        self.n_features = n_features
+        self.ngram_range = ngram_range
+        self._vectorizer = HashingVectorizer(
+            n_features=n_features,
+            ngram_range=ngram_range,
+            alternate_sign=False,
+            norm="l2",
+            dtype=np.float32,
+        )
+
+    @property
+    def model_id(self) -> str:
+        """Identifier encoding the vectorizer configuration."""
+        return f"hashing-v1-{self.n_features}"
+
+    def embed(self, texts: Sequence[str]) -> FloatArray:
+        """Compute deterministic L2-normalized embeddings for *texts* offline."""
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        cleaned = [t.strip() if t and t.strip() else "_" for t in texts]
+        sparse = self._vectorizer.transform(cleaned)
+        return _l2_normalize(sparse.toarray())
+
+
 class SentenceTransformerProvider:
     """Optional batched SentenceTransformer provider (requires ``[embeddings]`` extra)."""
+
+    is_stateless: bool = True
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", batch_size: int = 64) -> None:
         self.model_name = model_name
         self.batch_size = batch_size
         self._model: Any = None
+
+    @property
+    def model_id(self) -> str:
+        """Identifier encoding the underlying SentenceTransformer model."""
+        return f"sentence-transformers:{self.model_name}"
 
     def _get_model(self) -> Any:
         if self._model is not None:

@@ -29,6 +29,7 @@ from knowledgereduce.query import (
     k_hop_neighborhood,
 )
 from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer
+from knowledgereduce.resolve import HashingEmbeddingProvider
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
 
@@ -42,6 +43,7 @@ __all__ = [
     "Entity",
     "Evidence",
     "GraphStore",
+    "HashingEmbeddingProvider",
     "HybridGraphRAGRetriever",
     "IntegrityValidator",
     "KnowledgeLayer",

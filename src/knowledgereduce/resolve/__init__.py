@@ -4,6 +4,7 @@ from knowledgereduce.resolve.blocking import DisjointSet, cluster_claims, normal
 from knowledgereduce.resolve.disambiguator import resolve_entities_and_remap
 from knowledgereduce.resolve.embeddings import (
     EmbeddingProvider,
+    HashingEmbeddingProvider,
     SentenceTransformerProvider,
     TfidfSVDProvider,
 )
@@ -11,6 +12,7 @@ from knowledgereduce.resolve.embeddings import (
 __all__ = [
     "DisjointSet",
     "EmbeddingProvider",
+    "HashingEmbeddingProvider",
     "SentenceTransformerProvider",
     "TfidfSVDProvider",
     "cluster_claims",

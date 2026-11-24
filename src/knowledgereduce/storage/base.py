@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import networkx as nx
+import numpy as np
+from numpy.typing import NDArray
 
 from knowledgereduce.models import (
     Claim,
@@ -16,6 +20,38 @@ from knowledgereduce.models import (
     Relation,
     ReliabilityRating,
 )
+
+_SEARCH_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def tokenize_search_query(query: str, *, max_tokens: int = 12) -> list[str]:
+    """Extract deduplicated lowercase alphanumeric search tokens from *query*."""
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for tok in _SEARCH_TOKEN_RE.findall(query.lower()):
+        if tok not in seen:
+            seen.add(tok)
+            tokens.append(tok)
+            if len(tokens) >= max_tokens:
+                break
+    return tokens
+
+
+def filter_matching_conflicts(
+    conflicts: Sequence[ConflictRecord],
+    claim_ids: set[str],
+) -> list[ConflictRecord]:
+    """Return conflicts referencing any claim ID in *claim_ids*."""
+    if not claim_ids:
+        return []
+    return [
+        cf
+        for cf in conflicts
+        if cf.target_key in claim_ids
+        or any(
+            str(cid) in claim_ids for cand in cf.candidates for cid in (cand.get("claim_ids") or [])
+        )
+    ]
 
 
 @runtime_checkable
@@ -95,6 +131,55 @@ class GraphStore(Protocol):
 
     def to_networkx(self, layer_id: str) -> nx.MultiDiGraph:
         """Materialize *layer_id* as a fresh NetworkX MultiDiGraph."""
+        ...
+
+    def list_claim_texts(self, layer_id: str) -> list[tuple[str, str]]:
+        """Return ``(claim_id, statement)`` pairs for *layer_id* without full object parsing."""
+        ...
+
+    def save_claim_embeddings(
+        self,
+        layer_id: str,
+        claim_ids: Sequence[str],
+        vectors: NDArray[np.float32],
+        *,
+        model_id: str,
+    ) -> None:
+        """Persist precomputed claim embeddings keyed by *model_id* for *layer_id*."""
+        ...
+
+    def load_claim_embeddings(
+        self,
+        layer_id: str,
+        *,
+        model_id: str,
+    ) -> tuple[list[str], NDArray[np.float32]] | None:
+        """Load persisted claim embeddings matching *model_id*, or ``None`` on cache miss."""
+        ...
+
+    def search_claims_lexical(
+        self,
+        layer_id: str,
+        query: str,
+        *,
+        min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+        limit: int = 200,
+    ) -> list[Claim]:
+        """Return top candidate claims ranked by lexical token matches and quality."""
+        ...
+
+    def get_claims_by_ids(self, layer_id: str, claim_ids: Sequence[str]) -> list[Claim]:
+        """Fetch specific claims matching *claim_ids*."""
+        ...
+
+    def get_k_hop_subgraph(
+        self,
+        layer_id: str,
+        seed_node_ids: Sequence[str],
+        *,
+        hops: int = 1,
+    ) -> tuple[nx.MultiDiGraph, list[Entity], list[ConflictRecord]]:
+        """Extract bounded k-hop induced subgraph, touched entities, and touched conflicts."""
         ...
 
 

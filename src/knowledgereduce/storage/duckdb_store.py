@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import networkx as nx
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from numpy.typing import NDArray
 
 from knowledgereduce.models import (
     Claim,
@@ -30,7 +33,11 @@ from knowledgereduce.models import (
     validate_layer_id,
 )
 from knowledgereduce.security import ensure_within_base
-from knowledgereduce.storage.base import layer_data_to_networkx
+from knowledgereduce.storage.base import (
+    filter_matching_conflicts,
+    layer_data_to_networkx,
+    tokenize_search_query,
+)
 
 SCHEMA_VERSION = "1.0"
 
@@ -117,6 +124,14 @@ _CONFLICTS_SCHEMA = pa.schema(
         ("resolved_at", pa.string()),
         ("needs_review", pa.bool_()),
         ("resolution_notes", pa.string()),
+    ]
+)
+
+_CLAIM_EMBEDDINGS_SCHEMA = pa.schema(
+    [
+        ("claim_id", pa.string()),
+        ("model_id", pa.string()),
+        ("embedding", pa.list_(pa.float32())),
     ]
 )
 
@@ -577,3 +592,180 @@ class DuckDBParquetStore:
 
     def to_networkx(self, layer_id: str) -> nx.MultiDiGraph:
         return layer_data_to_networkx(self.load_layer(layer_id))
+
+    def list_claim_texts(self, layer_id: str) -> list[tuple[str, str]]:
+        pq_path = str(self._parquet_path(layer_id, "claims"))
+        rows = self._query_rows("SELECT claim_id, statement FROM read_parquet(?)", [pq_path])
+        return [(str(r["claim_id"]), str(r["statement"])) for r in rows]
+
+    def save_claim_embeddings(
+        self,
+        layer_id: str,
+        claim_ids: Sequence[str],
+        vectors: NDArray[np.float32],
+        *,
+        model_id: str,
+    ) -> None:
+        claims_pq = self._parquet_path(layer_id, "claims")
+        layer_dir = claims_pq.parent
+        arr = np.asarray(vectors, dtype=np.float32)
+        if len(claim_ids) > 0 and (arr.ndim != 2 or arr.shape[0] != len(claim_ids)):
+            raise StorageError(
+                f"Embedding count mismatch: got {len(claim_ids)} claim_ids vs shape {arr.shape}."
+            )
+        if len(claim_ids) == 0:
+            table = pa.Table.from_pydict(
+                {"claim_id": [], "model_id": [], "embedding": []},
+                schema=_CLAIM_EMBEDDINGS_SCHEMA,
+            )
+        else:
+            table = pa.table(
+                {
+                    "claim_id": pa.array(list(claim_ids), type=pa.string()),
+                    "model_id": pa.array([model_id] * len(claim_ids), type=pa.string()),
+                    "embedding": pa.array(arr.tolist(), type=pa.list_(pa.float32())),
+                },
+                schema=_CLAIM_EMBEDDINGS_SCHEMA,
+            )
+        staging_emb = layer_dir / ".staging_claim_embeddings.parquet"
+        target_emb = layer_dir / "claim_embeddings.parquet"
+        pq.write_table(table, staging_emb, compression="zstd")
+        staging_emb.replace(target_emb)
+
+    def load_claim_embeddings(
+        self,
+        layer_id: str,
+        *,
+        model_id: str,
+    ) -> tuple[list[str], NDArray[np.float32]] | None:
+        self._parquet_path(layer_id, "claims")
+        emb_path = self._layer_path(layer_id) / "claim_embeddings.parquet"
+        if not emb_path.is_file():
+            return None
+        table = pq.read_table(emb_path)
+        if table.num_rows == 0:
+            return None
+        stored_models = {str(m) for m in table.column("model_id").to_pylist()}
+        if stored_models != {model_id}:
+            return None
+        ids = [str(cid) for cid in table.column("claim_id").to_pylist()]
+        vecs = np.asarray(table.column("embedding").to_pylist(), dtype=np.float32)
+        return ids, vecs
+
+    def search_claims_lexical(
+        self,
+        layer_id: str,
+        query: str,
+        *,
+        min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+        limit: int = 200,
+    ) -> list[Claim]:
+        pq_path = str(self._parquet_path(layer_id, "claims"))
+        if limit <= 0:
+            return []
+        like_patterns = [f"%{tok}%" for tok in tokenize_search_query(query)]
+        sql = (
+            "SELECT * FROM read_parquet(?) "
+            "WHERE reliability >= ? "
+            "ORDER BY len(list_filter(?::VARCHAR[], tok -> LOWER(statement) LIKE tok)) DESC, "
+            "quality_score DESC, claim_id ASC "
+            "LIMIT ?"
+        )
+        return [
+            _claim_from_row(r)
+            for r in self._query_rows(sql, [pq_path, int(min_reliability), like_patterns, limit])
+        ]
+
+    def get_claims_by_ids(self, layer_id: str, claim_ids: Sequence[str]) -> list[Claim]:
+        pq_path = str(self._parquet_path(layer_id, "claims"))
+        unique_ids = list(dict.fromkeys(claim_ids))
+        if not unique_ids:
+            return []
+        rows = self._query_rows(
+            "SELECT * FROM read_parquet(?) WHERE claim_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [pq_path, unique_ids],
+        )
+        by_id = {str(r["claim_id"]): _claim_from_row(r) for r in rows}
+        return [by_id[cid] for cid in unique_ids if cid in by_id]
+
+    def get_k_hop_subgraph(
+        self,
+        layer_id: str,
+        seed_node_ids: Sequence[str],
+        *,
+        hops: int = 1,
+    ) -> tuple[nx.MultiDiGraph, list[Entity], list[ConflictRecord]]:
+        layer_dir = self._layer_path(layer_id)
+        manifest_path = layer_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise StorageError(f"Layer {layer_id!r} not found.")
+        ent_pq = str(self._parquet_path(layer_id, "entities"))
+        clm_pq = str(self._parquet_path(layer_id, "claims"))
+        rel_pq = str(self._parquet_path(layer_id, "relations"))
+        cf_pq = str(self._parquet_path(layer_id, "conflicts"))
+        if not seed_node_ids:
+            return nx.MultiDiGraph(), [], []
+
+        visited: set[str] = set(seed_node_ids)
+        frontier: set[str] = set(seed_node_ids)
+        for _ in range(max(0, hops)):
+            if not frontier:
+                break
+            frontier_list = list(frontier)
+            hop_rows = self._query_rows(
+                "SELECT source_id, target_id FROM read_parquet(?) "
+                "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
+                "OR target_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                [rel_pq, frontier_list, frontier_list],
+            )
+            next_frontier: set[str] = set()
+            for r in hop_rows:
+                next_frontier.add(str(r["source_id"]))
+                next_frontier.add(str(r["target_id"]))
+            frontier = next_frontier - visited
+            visited.update(frontier)
+
+        visited_list = list(visited)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        layer_meta = KnowledgeLayer.model_validate(manifest["layer"])
+
+        ent_rows = self._query_rows(
+            "SELECT * FROM read_parquet(?) WHERE entity_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [ent_pq, visited_list],
+        )
+        clm_rows = self._query_rows(
+            "SELECT * FROM read_parquet(?) WHERE claim_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [clm_pq, visited_list],
+        )
+        sub_entities = [_entity_from_row(r) for r in ent_rows]
+        sub_claims = [_claim_from_row(r) for r in clm_rows]
+        surviving = {e.entity_id for e in sub_entities} | {c.claim_id for c in sub_claims}
+
+        sub_relations: list[Relation] = []
+        if hops > 0 and surviving:
+            surviving_list = list(surviving)
+            rel_rows = self._query_rows(
+                "SELECT * FROM read_parquet(?) "
+                "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
+                "AND target_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                [rel_pq, surviving_list, surviving_list],
+            )
+            sub_relations = [_relation_from_row(r) for r in rel_rows]
+
+        sub_graph = layer_data_to_networkx(
+            LayerData(
+                layer=layer_meta,
+                entities=sub_entities,
+                claims=sub_claims,
+                relations=sub_relations,
+            )
+        )
+        sub_claim_ids = {c.claim_id for c in sub_claims}
+        touched_conflicts: list[ConflictRecord] = []
+        if sub_claim_ids:
+            cf_rows = self._query_rows("SELECT * FROM read_parquet(?)", [cf_pq])
+            touched_conflicts = filter_matching_conflicts(
+                [_conflict_from_row(r) for r in cf_rows],
+                sub_claim_ids,
+            )
+        return sub_graph, sub_entities, touched_conflicts
