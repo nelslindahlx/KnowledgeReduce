@@ -219,10 +219,11 @@ class HybridGraphRAGRetriever:
                     context_bonus = 0.20 * (sum(idf[tok] for tok in prov_hits) / total_q_idf)
 
             lex = min(1.0, 0.65 * idf_overlap + 0.35 * fuzzy_part + context_bonus)
-            if not wants_chapter and _is_structural_heading(clm.statement):
-                lex *= 0.85
-
             sem = float(sem_scores[idx])
+            if not wants_chapter and _is_structural_heading(clm.statement):
+                lex *= 0.75
+                sem *= 0.75
+
             qual = clm.quality_score / 100.0
             total = round(0.55 * lex + 0.35 * sem + 0.10 * qual, 4)
             scored.append((clm, total, round(lex, 4), round(sem, 4)))

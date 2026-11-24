@@ -32,18 +32,26 @@ def _dedup_evidence(items: Sequence[Evidence]) -> list[Evidence]:
     return result
 
 
+def _has_grounded_triple(claim: Claim) -> bool:
+    return bool(
+        claim.subject_id
+        and claim.predicate
+        and (claim.object_id is not None or claim.object_literal is not None)
+    )
+
+
 def _claim_importance(
     claim: Claim,
     source_trust: dict[str, float],
     degree_map: dict[str, int],
     max_degree: int,
-) -> tuple[float, int, str]:
+) -> tuple[float, int, int, str]:
     rel_norm = int(claim.reliability) / 4.0
     trust_norm = source_trust.get(claim.source_id, 0.5)
     spec_norm = min(len(claim.statement.strip()) / 200.0, 1.0)
     conn_norm = degree_map.get(claim.claim_id, 0) / max(max_degree, 1)
     score = 0.35 * rel_norm + 0.25 * trust_norm + 0.20 * spec_norm + 0.20 * conn_norm
-    return (round(score, 6), len(claim.evidence), claim.claim_id)
+    return (round(score, 6), int(_has_grounded_triple(claim)), len(claim.evidence), claim.claim_id)
 
 
 def _merge_claim_cluster(
@@ -77,6 +85,28 @@ def _merge_claim_cluster(
     min_rec = min(c.recorded_at for c in ordered)
     max_upd = max(c.updated_at for c in ordered)
 
+    triple_donor = (
+        winner
+        if _has_grounded_triple(winner)
+        else next((c for c in ordered[1:] if _has_grounded_triple(c)), winner)
+    )
+    published_at = winner.published_at or next(
+        (c.published_at for c in ordered if c.published_at is not None), None
+    )
+    author_creator = winner.author_creator or next(
+        (c.author_creator for c in ordered if c.author_creator), None
+    )
+    url_reference = winner.url_reference or next(
+        (c.url_reference for c in ordered if c.url_reference), None
+    )
+    source_title = winner.source_title or next(
+        (c.source_title for c in ordered if c.source_title), ""
+    )
+    contextual_notes = winner.contextual_notes or next(
+        (c.contextual_notes for c in ordered if c.contextual_notes), ""
+    )
+    source_id = winner.source_id or next((c.source_id for c in ordered if c.source_id), "")
+
     merged_claim = winner.model_copy(
         update={
             "tags": all_tags,
@@ -88,6 +118,16 @@ def _merge_claim_cluster(
             "confidence": max_conf,
             "recorded_at": min_rec,
             "updated_at": max_upd,
+            "published_at": published_at,
+            "author_creator": author_creator,
+            "url_reference": url_reference,
+            "source_title": source_title,
+            "contextual_notes": contextual_notes,
+            "source_id": source_id,
+            "subject_id": triple_donor.subject_id,
+            "predicate": triple_donor.predicate,
+            "object_id": triple_donor.object_id,
+            "object_literal": triple_donor.object_literal,
         }
     )
     return merged_claim, id_map
@@ -150,6 +190,7 @@ class KnowledgeReducer:
             semantic_threshold=self.semantic_threshold,
             min_length=self.min_claim_length,
             embedding_provider=self.embedding_provider,
+            functional_predicates=self.single_valued_predicates,
         )
 
         reduced_claims: list[Claim] = []

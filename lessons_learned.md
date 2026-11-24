@@ -33,7 +33,7 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 ## Lesson 5: Stop-Word Saturation & Structural Heading Dominance in DuckDB + GraphRAG
 - **Symptom**: Natural-language questions ("When and where did...") returned off-target generic sentences or bare Title-Case section headings in `HybridGraphRAGRetriever`.
 - **Root Cause**: Raw SQL `LIKE` queries in `src/knowledgereduce/storage/base.py` tokenized stop words and high-frequency corpus terms with equal weight, while short unpunctuated headings achieved higher token overlap density than full declarative sentences in `src/knowledgereduce/query/graphrag.py`.
-- **Resolution**: Filter query stop words via `tokenize_search_query()`, score candidates with IDF-weighted lexical overlap + bounded provenance bonus + structural heading de-biasing (`_is_structural_heading`), and maintain retrieval regressions in `tests/unit/test_query.py`.
+- **Resolution**: Filter query stop words via `tokenize_search_query()`, score candidates with IDF-weighted lexical overlap + bounded provenance bonus + `0.75` structural heading scaling on both lexical and semantic scores (`_is_structural_heading` in `src/knowledgereduce/query/graphrag.py`), and maintain retrieval regressions in `tests/unit/test_query.py`.
 
 ---
 
