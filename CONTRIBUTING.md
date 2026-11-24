@@ -1,6 +1,6 @@
 # Contributing to KnowledgeReduce
 
-KnowledgeReduce enforces a **Maker / Checker Pull Request** process on `main` for both human contributors and AI agents. Direct pushes to `main` are disallowed; all changes flow through feature branches, automated CI gates, and explicit review.
+KnowledgeReduce enforces a **Maker / Checker Pull Request** process on `main` paired with **zero-GitHub-Actions-minutes stratified local CI**. Direct pushes to `main` are blocked; all changes flow through ephemeral feature branches, complete local CI verification, independent Checker diff audits, and clean PR merges.
 
 ---
 
@@ -8,62 +8,63 @@ KnowledgeReduce enforces a **Maker / Checker Pull Request** process on `main` fo
 
 ```bash
 git checkout main
-git pull origin main
+git pull --ff-only origin main
 git checkout -b <type>/<short-description>   # e.g. feat/fts-index, fix/crawl-timeout, chore/docs
 uv sync --extra dev
 ```
 
-Always confirm your branch is **not** `main` before committing.
+Always confirm `git branch --show-current` is **not** `main` before committing, and never reuse a previously merged branch name.
 
 ---
 
-## 2. Maker Responsibilities (Author)
+## 2. Stratified Local CI (Zero GitHub Action Minutes)
 
-Implement your change alongside focused unit/integration tests and run the local verification suite:
+Automatic GitHub Actions triggers (`push`, `pull_request`) are disabled (`workflow_dispatch` only) so routine development consumes **zero** GitHub Actions minutes. Run verification locally using the `Makefile` targets:
 
 ```bash
-uv run python -W error::Warning -c "import knowledgereduce"
-uv run ruff check src tests examples benchmarks
-uv run ruff format --check src tests examples benchmarks
-uv run mypy --strict src
-uv run pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=85
+make canary      # <10s: import warning gate + tests/meta/ invariants & governance checks
+make lint        # ruff check & ruff format --check across src, tests, examples, benchmarks, scripts
+make typecheck   # mypy --strict src
+make smoke-pr    # canary + lint + typecheck + tests/unit/ + tests/golden/
+make test        # full pytest suite with --cov-fail-under=85
+make golden      # Civic Honors book strict regression benchmark
+make local-ci    # complete local CI gate (canary + lint + typecheck + test + examples + notebooks + 1K benchmark)
 ```
 
-When touching extraction, storage, GraphRAG retrieval, stacking, examples, or notebooks, also verify:
+Cross-platform invocations also work directly without `make`:
 
 ```bash
-uv run pip-audit
-for s in examples/*.py; do uv run python "$s"; done
-uv run python benchmarks/run_benchmark.py --scale 1000
+uv run --no-sync python -W error::Warning -c "import knowledgereduce"
+uv run --no-sync ruff check src tests examples benchmarks scripts
+uv run --no-sync ruff format --check src tests examples benchmarks scripts
+uv run --no-sync mypy --strict src
+uv run --no-sync pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=85
+uv run --no-sync python benchmarks/run_benchmark.py --scale 1000
 ```
 
-Push your branch and open a Pull Request against `main` using `.github/pull_request_template.md`, filling in **Summary**, **Linked Issue**, and **Maker Checklist** honestly from observed command outputs.
+---
+
+## 3. Maker & Checker Workflow
+
+### Stage A — Maker (Authoring & Local CI)
+1. Implement focused changes with strict typing, docstrings on new public APIs, and regression/negative tests.
+2. Update `CHANGELOG.md`, `lessons_learned.md`, and `docs/plans/implementation_plan.md` when adding features, fixing subtle bugs, or completing roadmap milestones.
+3. Run `make local-ci` (and `make golden` when changing extraction, resolution, reduction, storage, or GraphRAG behavior).
+4. Push the branch and open a PR using `.github/pull_request_template.md`, completing `## Summary`, `## Linked Issue`, and `## Maker Checklist` truthfully from observed command outputs (with zero machine-local paths).
+
+### Stage B — Checker (Audit, Merge & Zero-Lingering Check)
+1. Audit `git diff origin/main...HEAD` for boundary correctness, SSRF validation (`validate_url_safe`), export/workspace path sandboxing (`ensure_within_base`), parameterized DuckDB SQL (`read_parquet(?)`, `UNNEST`), and test coverage.
+2. Confirm `make local-ci` passed on the head commit and record the findings under `## Checker Review` on the PR.
+3. Merge and clean up the branch via:
+   ```bash
+   uv run --no-sync python scripts/github_pr_helper.py --merge --pr <PR_NUMBER> --delete-branch
+   git checkout main && git pull --ff-only origin main
+   git fetch --prune origin
+   uv run --no-sync python scripts/github_pr_helper.py --audit
+   ```
 
 ---
 
-## 3. Automated CI Checks
+## 4. Releases
 
-Every Pull Request targeting `main` must pass all three required status checks cleanly:
-
-1. **`quality-and-tests (3.11)`** — `ruff check`, `ruff format --check`, `mypy --strict src`, and `pytest --cov-fail-under=85` on Python 3.11.
-2. **`quality-and-tests (3.12)`** — Full Python 3.12 matrix including offline `examples/*.py`, stripped `notebooks/*.ipynb` execution, and `benchmarks/run_benchmark.py --scale 1000`.
-3. **`maker-checker-gate`** — Verifies non-`main` PR source branch, completed `## Maker` & `## Checker` sections in the PR description, zero tracked `*.pyc` files, and zero committed notebook outputs.
-
----
-
-## 4. Checker Responsibilities (Independent Reviewer)
-
-Every PR requires an independent **Checker** audit before merge:
-
-1. **Diff & Correctness Audit:** Review the complete diff for boundary conditions, type safety, exception propagation, and single-purpose modular structure.
-2. **Security Review:** Verify URL SSRF validation (`validate_url_safe`), workspace/export path sandboxing (`ensure_within_base`), parameterized DuckDB SQL (`read_parquet(?)`, `UNNEST`), and GitHub Actions workflow `env:` variable binding (no shell injection).
-3. **Test & CI Verification:** Confirm regression and negative tests cover the changed behavior and all required checks pass on the head commit.
-4. **Structured Review & Sign-Off:** Record findings in the PR `## Checker Review` comment/section, resolve all review threads, obtain CODEOWNER approval (`@nelslindahlx` per `.github/CODEOWNERS`), and merge cleanly into `main`.
-
-> **Solo-Maintainer Note:** While `@nelslindahlx` is the sole repository collaborator, GitHub prohibits PR authors from approving their own PRs; `enforce_admins` on `main` allows the repository owner to merge after all required CI checks pass and the Checker review is recorded. Add a second reviewer account and enable `enforce_admins` whenever strict two-person GitHub UI enforcement is desired.
-
----
-
-## 5. Releases
-
-Version tags (`vX.Y.Z`) are created from merged commits on `main` after verifying CI passes on `main`. See `.github/workflows/release.yml` for manual PyPI Trusted Publisher publishing.
+Version strings in `pyproject.toml` and `src/knowledgereduce/__init__.py` must match 1:1. Annotated release tags (`vX.Y.Z`) are created from merged commits on `main` after `make local-ci`, `make golden`, and `--audit` pass cleanly. See `.github/workflows/release.yml` for manual `workflow_dispatch` PyPI Trusted Publisher releases.

@@ -1,21 +1,21 @@
+# GitHub Actions automatic triggers are disabled to avoid consuming GitHub Action minutes.
+# Execute local CI via `make local-ci` or `uv run --no-sync python -m pytest tests/meta/ -q`.
 name: PR Governance
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   maker-checker-gate:
     name: maker-checker-gate
     runs-on: ubuntu-latest
     steps:
-      - name: Check out PR branch
+      - name: Check out repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Verify Maker / Checker PR metadata and repo hygiene
+      - name: Verify governance invariants and repository hygiene
         env:
           HEAD_REF: ${{ github.head_ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -29,23 +29,20 @@ jobs:
           import sys
 
           head_ref = os.environ.get("HEAD_REF", "").strip()
-          if not head_ref or head_ref == "main":
-              sys.exit(f"PR head branch must not be 'main' (got {head_ref!r}).")
-
           pr_body = os.environ.get("PR_BODY", "").strip()
-          if not pr_body:
-              sys.exit("PR description must not be empty; complete the Maker / Checker template.")
-
-          has_maker = re.search(r"^##\s+Maker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE)
-          has_checker = re.search(r"^##\s+Checker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE)
-          if not has_maker or not has_checker:
-              sys.exit(
-                  "PR description must include both '## Maker ...' and '## Checker ...' sections."
+          if head_ref:
+              if head_ref == "main":
+                  sys.exit(f"PR head branch must not be 'main' (got {head_ref!r}).")
+              has_maker = re.search(r"^##\s+Maker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE)
+              has_checker = re.search(
+                  r"^##\s+Checker\b", pr_body, flags=re.IGNORECASE | re.MULTILINE
               )
+              if not has_maker or not has_checker:
+                  sys.exit(
+                      "PR description must include both '## Maker ...' and '## Checker ...' sections."
+                  )
 
-          pyc_files = subprocess.check_output(
-              ["git", "ls-files", "*.pyc"], text=True
-          ).strip()
+          pyc_files = subprocess.check_output(["git", "ls-files", "*.pyc"], text=True).strip()
           if pyc_files:
               sys.exit(f"Tracked .pyc bytecode files are forbidden:\n{pyc_files}")
 

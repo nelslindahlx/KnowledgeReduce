@@ -1,10 +1,9 @@
+# GitHub Actions automatic triggers are disabled to avoid consuming GitHub Action minutes.
+# Execute local CI via `make local-ci` or `uv run --no-sync pytest`.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   quality-and-tests:
@@ -30,10 +29,10 @@ jobs:
         run: uv sync --python ${{ matrix.python-version }} --extra dev
 
       - name: Lint with ruff
-        run: uv run --python ${{ matrix.python-version }} ruff check src tests examples benchmarks
+        run: uv run --python ${{ matrix.python-version }} ruff check src tests examples benchmarks scripts
 
       - name: Check formatting with ruff
-        run: uv run --python ${{ matrix.python-version }} ruff format --check src tests examples benchmarks
+        run: uv run --python ${{ matrix.python-version }} ruff format --check src tests examples benchmarks scripts
 
       - name: Type check with mypy
         run: uv run --python ${{ matrix.python-version }} mypy --strict src

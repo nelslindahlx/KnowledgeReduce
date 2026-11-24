@@ -2,6 +2,19 @@
 
 All notable changes to KnowledgeReduce are documented in this file.
 
+## [1.3.0] - 2026-11-24
+
+### Added
+- **Zero-GitHub-Minutes Local CI & Maker/Checker Tooling (`#27`)**: Switched `.github/workflows/ci.yml` and `.github/workflows/pr-governance.yml` to manual `workflow_dispatch` only, added `Makefile` stratified local CI targets (`canary`, `lint`, `typecheck`, `smoke-pr`, `test`, `golden`, `benchmark`, `local-ci`, `audit-prs`), synchronized `AGENTS.md` and `.agents/AGENTS.md`, added `.agents/rules/`, `.agents/hooks.json` (`scripts/hooks/pre_pr_safety_gate.py`), `scripts/github_pr_helper.py`, `lessons_learned.md`, `docs/plans/`, and mechanical governance/relevance tests in `tests/meta/test_governance_and_invariants.py`.
+
+## [1.2.0] - 2026-11-24
+
+### Added
+- **Civic Honors Offline Golden Benchmark (`#15`)**: Froze the 139,596-char *Civic Honors: The Book* corpus (`benchmarks/civichonors_book_benchmark.py`, `gold_annotations.json`, `baseline_v1_1_0.json`) and pytest regression suite (`tests/golden/test_civichonors_book_golden.py`).
+- **Deterministic NER, Two-Pass Linking & Grounded Triples (`#20`)**: Expanded abbreviation-aware splitting, APA bibliography segmentation, heading suppression (`12 -> 0` heading false positives), two-pass entity-to-claim linking, and non-functional grounded SPO triples.
+- **Cross-Type Disambiguation & GraphRAG Ranking (`#21`, `#22`)**: Added cross-type exact-name entity consolidation (`DATE > GPE > ORG > PERSON > CONCEPT`), omitted middle/leading-initial person matching (`alias_merge_recall: 0.80 -> 1.00`), stop-word-aware `tokenize_search_query`, and IDF-weighted Hybrid GraphRAG ranking (`retrieval_hit_at_1: 0.80 -> 1.00`).
+- **Maker/Checker Governance & Crawler Fix (`#13`, `#14`)**: Added `CODEOWNERS`, PR template, governance docs, and fixed `httpx.DecodingError` gzip double-decompression in `AsyncWebCrawler._safe_get`.
+
 ## [1.1.0] - 2026-11-23
 
 ### Added
