@@ -46,3 +46,9 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 ## Lesson 7: Zero-GitHub-Actions-Minutes Stratified Local CI & Maker/Checker Audit
 - **Problem**: Frequent PRs across multi-phase milestones consume GitHub Actions minutes rapidly when triggered automatically on every push and pull request.
 - **Resolution**: Configure `.github/workflows/ci.yml` and `.github/workflows/pr-governance.yml` for manual `workflow_dispatch` only, run complete stratified validation locally via `Makefile` (`make canary`, `make smoke-pr`, `make local-ci`, `make golden`), guard `main` pushes with `.agents/hooks.json` (`scripts/hooks/pre_pr_safety_gate.py`), automate PR lifecycle and lingering-branch audits with `scripts/github_pr_helper.py`, and keep `CHANGELOG.md` and `docs/plans/` synchronized on every PR.
+
+---
+
+## Lesson 8: Pre-Warmed Stateless Claim Embeddings & Empty-Delta Incremental Refresh
+- **Symptom**: First queries against freshly stored DuckDB+Parquet layers paid full cold vector-index build latency, while re-ingesting mostly unchanged corpora re-processed unchanged sources unnecessarily.
+- **Resolution & Guard**: Wire `incremental_from_layer` and `build_embeddings_index` (`src/knowledgereduce/pipeline/config.py`, `src/knowledgereduce/pipeline/runner.py`) to skip unchanged web/local sources via prior `content_sha256` digests, record parent lineage automatically, guard empty-claim delta layers before Parquet embedding writes, and verify across both `DuckDBParquetStore` and `MemoryGraphStore` in `tests/unit/test_pipeline_incremental.py`.
