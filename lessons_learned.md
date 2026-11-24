@@ -52,3 +52,8 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 ## Lesson 8: Pre-Warmed Stateless Claim Embeddings & Empty-Delta Incremental Refresh
 - **Symptom**: First queries against freshly stored DuckDB+Parquet layers paid full cold vector-index build latency, while re-ingesting mostly unchanged corpora re-processed unchanged sources unnecessarily.
 - **Resolution & Guard**: Wire `incremental_from_layer` and `build_embeddings_index` (`src/knowledgereduce/pipeline/config.py`, `src/knowledgereduce/pipeline/runner.py`) to skip unchanged web/local sources via prior `content_sha256` digests, record parent lineage automatically, guard empty-claim delta layers before Parquet embedding writes, and verify across both `DuckDBParquetStore` and `MemoryGraphStore` in `tests/unit/test_pipeline_incremental.py`.
+
+---
+
+## Lesson 9: Shared Analytics Payloads & GFM-Safe Markdown Export
+- **Design Pattern**: Rather than duplicating centrality, community detection, shortest-path, or lineage aggregation logic across CLI (`src/knowledgereduce/cli.py`) and MCP (`src/knowledgereduce/mcp/server.py`), route both interfaces through shared helpers (`build_layers_payload`, `build_layer_lineage_payload`, `build_graph_analytics_payload`) and escape newlines and pipe characters (`|`) cleanly in `src/knowledgereduce/export/markdown_export.py` (tested in `tests/unit/test_markdown_and_analytics_surfaces.py` and `tests/integration/test_mcp_server.py`).

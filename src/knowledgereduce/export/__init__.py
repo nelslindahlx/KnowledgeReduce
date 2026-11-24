@@ -1,4 +1,4 @@
-"""Portable export utilities (JSON, sharded JSONL, GraphML, GEXF)."""
+"""Portable export utilities (JSON, sharded JSONL, GraphML, GEXF, Markdown)."""
 
 from knowledgereduce.export.graph_formats import export_gexf, export_graphml, to_sanitized_graph
 from knowledgereduce.export.json_export import (
@@ -7,16 +7,19 @@ from knowledgereduce.export.json_export import (
     node_link_data_compat,
     node_link_graph_compat,
 )
+from knowledgereduce.export.markdown_export import export_layer_markdown, render_layer_markdown
 from knowledgereduce.export.sharded import export_layer_sharded, import_layer_sharded
 
 __all__ = [
     "export_gexf",
     "export_graphml",
     "export_layer_json",
+    "export_layer_markdown",
     "export_layer_sharded",
     "import_layer_json",
     "import_layer_sharded",
     "node_link_data_compat",
     "node_link_graph_compat",
+    "render_layer_markdown",
     "to_sanitized_graph",
 ]
