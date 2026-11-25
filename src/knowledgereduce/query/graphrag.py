@@ -145,8 +145,15 @@ class HybridGraphRAGRetriever:
             else:
                 all_sem = np.zeros(len(idx_ids), dtype=np.float32)
 
-            id_to_sem = {cid: float(all_sem[i]) for i, cid in enumerate(idx_ids)}
             pool = max(candidate_pool_size, top_k * 20)
+            if len(idx_ids) > pool:
+                top_indices = np.argpartition(all_sem, -pool)[-pool:]
+                sem_lookup = {idx_ids[int(i)]: float(all_sem[int(i)]) for i in top_indices}
+                top_sem_ids = list(sem_lookup.keys())
+            else:
+                sem_lookup = {cid: float(all_sem[i]) for i, cid in enumerate(idx_ids)}
+                top_sem_ids = list(idx_ids)
+
             if isinstance(self.store, _SummaryCapableStore):
                 lexical_summaries = self.store.search_claim_summaries_lexical(
                     layer_id,
@@ -155,12 +162,6 @@ class HybridGraphRAGRetriever:
                     limit=pool,
                 )
                 lexical_ids = {c.claim_id for c in lexical_summaries}
-
-                if len(idx_ids) > pool:
-                    top_indices = np.argpartition(all_sem, -pool)[-pool:]
-                    top_sem_ids = [idx_ids[int(i)] for i in top_indices]
-                else:
-                    top_sem_ids = list(idx_ids)
 
                 missing_ids = [cid for cid in top_sem_ids if cid not in lexical_ids]
                 semantic_summaries = (
@@ -185,12 +186,6 @@ class HybridGraphRAGRetriever:
                 )
                 lexical_ids = {c.claim_id for c in lexical_claims}
 
-                if len(idx_ids) > pool:
-                    top_indices = np.argpartition(all_sem, -pool)[-pool:]
-                    top_sem_ids = [idx_ids[int(i)] for i in top_indices]
-                else:
-                    top_sem_ids = list(idx_ids)
-
                 missing_ids = [cid for cid in top_sem_ids if cid not in lexical_ids]
                 semantic_claims = (
                     [
@@ -205,7 +200,17 @@ class HybridGraphRAGRetriever:
 
             if not candidates:
                 return RetrievedContext(layer_id=layer_id, query=query)
-            sem_scores = [id_to_sem.get(c.claim_id, 0.0) for c in candidates]
+
+            need_lex_sem = lexical_ids - sem_lookup.keys()
+            if need_lex_sem and len(idx_ids) > pool:
+                remaining = len(need_lex_sem)
+                for idx, cid in enumerate(idx_ids):
+                    if cid in need_lex_sem:
+                        sem_lookup[cid] = float(all_sem[idx])
+                        remaining -= 1
+                        if remaining == 0:
+                            break
+            sem_scores = [sem_lookup.get(c.claim_id, 0.0) for c in candidates]
         else:
             layer_data = self.store.load_layer(layer_id)
             candidates = [

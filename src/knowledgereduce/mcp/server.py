@@ -101,7 +101,7 @@ def build_layer_lineage_payload(stack_mgr: StackManager, layer_id: str) -> dict[
     """Return direct parents, ancestors, descendants, and lineage edges for *layer_id*."""
     ancestors = stack_mgr.get_ancestors(layer_id)
     descendants = stack_mgr.get_descendants(layer_id)
-    layer_data = stack_mgr.store.load_layer(layer_id)
+    layer_meta = stack_mgr.store.get_layer_manifest(layer_id)
     dag = stack_mgr.build_lineage_graph()
     relevant = {layer_id, *ancestors, *descendants}
     lineage_edges = sorted(
@@ -114,8 +114,8 @@ def build_layer_lineage_payload(stack_mgr: StackManager, layer_id: str) -> dict[
     )
     return {
         "layer_id": layer_id,
-        "layer": layer_data.layer.model_dump(mode="json"),
-        "parents": list(layer_data.layer.parent_layer_ids),
+        "layer": layer_meta.model_dump(mode="json"),
+        "parents": list(layer_meta.parent_layer_ids),
         "ancestors": ancestors,
         "descendants": descendants,
         "lineage_edges": lineage_edges,

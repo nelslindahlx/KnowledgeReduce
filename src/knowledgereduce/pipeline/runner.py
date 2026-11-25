@@ -91,16 +91,7 @@ def load_layer_source_hashes(
     """Load prior source ``(uri -> sha256, source_id -> sha256)`` digests for *layer_id*."""
     if not store.layer_exists(layer_id):
         raise StorageError(f"Incremental base layer {layer_id!r} does not exist.")
-    prior = store.load_layer(layer_id)
-    known_by_uri = {
-        src.uri: src.content_sha256 for src in prior.sources if src.uri and src.content_sha256
-    }
-    known_by_source_id = {
-        src.source_id: src.content_sha256
-        for src in prior.sources
-        if src.source_id and src.content_sha256
-    }
-    return known_by_uri, known_by_source_id
+    return store.list_source_hashes(layer_id)
 
 
 def filter_unchanged_documents(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
+from typing import Literal
 
 import networkx as nx
 import numpy as np
@@ -19,10 +21,13 @@ from knowledgereduce.models import (
     StorageError,
 )
 from knowledgereduce.storage.base import (
+    CLAIM_SORT_FIELDS,
     ClaimSummary,
     filter_matching_conflicts,
     layer_data_to_networkx,
+    normalize_query_datetime,
     rank_claim_summaries,
+    sort_claims_in_memory,
     summarize_claim,
     tokenize_search_query,
 )
@@ -55,6 +60,25 @@ class MemoryGraphStore:
 
     def layer_exists(self, layer_id: str) -> bool:
         return layer_id in self._layers
+
+    def get_layer_manifest(self, layer_id: str) -> KnowledgeLayer:
+        if layer_id not in self._layers:
+            raise StorageError(f"Layer {layer_id!r} not found.")
+        return KnowledgeLayer.model_validate(self._layers[layer_id].layer.model_dump())
+
+    def list_source_hashes(self, layer_id: str) -> tuple[dict[str, str], dict[str, str]]:
+        if layer_id not in self._layers:
+            raise StorageError(f"Layer {layer_id!r} not found.")
+        data = self._layers[layer_id]
+        known_by_uri = {
+            src.uri: src.content_sha256 for src in data.sources if src.uri and src.content_sha256
+        }
+        known_by_source_id = {
+            src.source_id: src.content_sha256
+            for src in data.sources
+            if src.source_id and src.content_sha256
+        }
+        return known_by_uri, known_by_source_id
 
     def list_layers(self) -> list[KnowledgeLayer]:
         layers = [
@@ -96,18 +120,37 @@ class MemoryGraphStore:
         *,
         category: str | None = None,
         tag: str | None = None,
+        tags_any: Sequence[str] | None = None,
         min_reliability: ReliabilityRating | None = None,
         needs_review: bool | None = None,
         text_query: str | None = None,
+        recorded_after: datetime | None = None,
+        recorded_before: datetime | None = None,
+        published_after: datetime | None = None,
+        published_before: datetime | None = None,
+        subject_id: str | None = None,
+        predicate: str | None = None,
+        source_id: str | None = None,
+        sort_by: Literal["quality_score", "reliability", "confidence", "updated_at"] | None = None,
+        descending: bool = True,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Claim]:
+        if sort_by is not None and sort_by not in CLAIM_SORT_FIELDS:
+            raise StorageError(f"Unsupported sort_by field {sort_by!r}.")
         data = self.load_layer(layer_id)
+        if limit <= 0 or offset < 0:
+            return []
         results = data.claims
         if category is not None:
             results = [c for c in results if c.category == category]
         if tag is not None:
             results = [c for c in results if tag in c.tags]
+        if tags_any is not None:
+            allowed_tags = set(tags_any)
+            if not allowed_tags:
+                return []
+            results = [c for c in results if allowed_tags.intersection(c.tags)]
         if min_reliability is not None:
             results = [c for c in results if int(c.reliability) >= int(min_reliability)]
         if needs_review is not None:
@@ -117,6 +160,36 @@ class MemoryGraphStore:
             results = [
                 c for c in results if q in c.statement.lower() or q in c.contextual_notes.lower()
             ]
+        if recorded_after is not None:
+            rec_after = normalize_query_datetime(recorded_after)
+            results = [c for c in results if normalize_query_datetime(c.recorded_at) >= rec_after]
+        if recorded_before is not None:
+            rec_before = normalize_query_datetime(recorded_before)
+            results = [c for c in results if normalize_query_datetime(c.recorded_at) <= rec_before]
+        if published_after is not None:
+            pub_after = normalize_query_datetime(published_after)
+            results = [
+                c
+                for c in results
+                if c.published_at is not None
+                and normalize_query_datetime(c.published_at) >= pub_after
+            ]
+        if published_before is not None:
+            pub_before = normalize_query_datetime(published_before)
+            results = [
+                c
+                for c in results
+                if c.published_at is not None
+                and normalize_query_datetime(c.published_at) <= pub_before
+            ]
+        if subject_id is not None:
+            results = [c for c in results if c.subject_id == subject_id]
+        if predicate is not None:
+            results = [c for c in results if c.predicate == predicate]
+        if source_id is not None:
+            results = [c for c in results if c.source_id == source_id]
+
+        results = sort_claims_in_memory(results, sort_by=sort_by, descending=descending)
         return results[offset : offset + limit]
 
     def list_relations(

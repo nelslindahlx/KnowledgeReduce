@@ -429,3 +429,131 @@ def test_analytics_edgeless_and_invalid_hop_edges() -> None:
     ranked = central_nodes(g, metric="pagerank", top_k=5)
     assert ranked == [("n1", 0.5), ("n2", 0.5)]
     assert detect_communities(g) == [["n1"], ["n2"]]
+
+
+def test_query_builder_sql_pushdown_matches_memory_backend(tmp_path: Path) -> None:
+    t0 = datetime(2025, 1, 1, tzinfo=UTC)
+    claims = [
+        Claim(
+            claim_id="c_a",
+            statement="Civic Honors launched in 2006.",
+            category="History",
+            tags=["civic", "alpha"],
+            reliability=ReliabilityRating.VERIFIED,
+            confidence=0.9,
+            recorded_at=t0 + timedelta(days=1),
+            updated_at=t0 + timedelta(days=10),
+            published_at=datetime(2006, 5, 1, tzinfo=UTC),
+            source_id="src_1",
+            subject_id="ent_ch",
+            predicate="PUBLISHED_IN",
+            object_literal="2006",
+        ),
+        Claim(
+            claim_id="c_b",
+            statement="University of Kansas hosts civic programs.",
+            category="History",
+            tags=["ku", "beta"],
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.95,
+            recorded_at=t0 + timedelta(days=2),
+            updated_at=t0 + timedelta(days=5),
+            published_at=datetime(2004, 6, 1, tzinfo=UTC),
+            source_id="src_2",
+            subject_id="ent_ku",
+            predicate="HOSTS",
+            object_literal="civic programs",
+        ),
+        Claim(
+            claim_id="c_c",
+            statement="Draft note with identical confidence and reliability.",
+            category="History",
+            tags=["ku", "gamma"],
+            reliability=ReliabilityRating.VERIFIED,
+            confidence=0.9,
+            recorded_at=t0 + timedelta(days=3),
+            updated_at=t0 + timedelta(days=15),
+            published_at=None,
+            source_id="src_1",
+            subject_id="ent_ku",
+            predicate="PUBLISHED_IN",
+            object_literal="2008",
+        ),
+    ]
+    data = LayerData(layer=KnowledgeLayer(layer_id="push", name="Pushdown"), claims=claims)
+    mem = MemoryGraphStore()
+    mem.save_layer(data)
+    with DuckDBParquetStore(tmp_path) as duck:
+        duck.save_layer(data)
+
+        for sort_col in ("quality_score", "reliability", "confidence", "updated_at"):
+            for desc in (True, False):
+                m_ids = [
+                    c.claim_id
+                    for c in QueryBuilder(mem, "push")
+                    .sort_claims(by=sort_col, descending=desc)
+                    .execute_claims()
+                ]
+                d_ids = [
+                    c.claim_id
+                    for c in QueryBuilder(duck, "push")
+                    .sort_claims(by=sort_col, descending=desc)
+                    .execute_claims()
+                ]
+                assert d_ids == m_ids
+
+        # Multi-tag, date-range, published-range, subject, predicate, source, and pagination parity.
+        for fn in (
+            lambda qb: qb.filter_tags_any(["alpha", "beta"]).sort_claims(by="quality_score"),
+            lambda qb: qb.filter_tags_any([]),
+            lambda qb: qb.filter_published_range(
+                after=datetime(2005, 1, 1, tzinfo=UTC),
+                before=datetime(2007, 1, 1, tzinfo=UTC),
+            ),
+            lambda qb: qb.filter_date_range(
+                after=t0 + timedelta(days=2),
+                before=t0 + timedelta(days=3),
+            ).sort_claims(by="updated_at", descending=True),
+            lambda qb: qb.filter_subject("ent_ku").filter_predicate("PUBLISHED_IN"),
+            lambda qb: qb.filter_source("src_1").sort_claims(by="quality_score").limit(1, offset=1),
+        ):
+            assert [c.claim_id for c in fn(QueryBuilder(duck, "push")).execute_claims()] == [
+                c.claim_id for c in fn(QueryBuilder(mem, "push")).execute_claims()
+            ]
+
+
+def test_hybrid_graphrag_bounded_pool_scores_lexical_hits_outside_top_semantic(
+    tmp_path: Path,
+) -> None:
+    claims = [
+        Claim(
+            claim_id=f"clm_bg_{i:03d}",
+            statement=f"Background operational sentence number {i} for padding.",
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            source_id="src_1",
+        )
+        for i in range(60)
+    ]
+    claims.append(
+        Claim(
+            claim_id="clm_target_exact",
+            statement="UniqueTokenAlpha founded Civic Honors Archive in 2006.",
+            reliability=ReliabilityRating.VERIFIED,
+            source_id="src_1",
+        )
+    )
+    with DuckDBParquetStore(tmp_path) as duck:
+        duck.save_layer(
+            LayerData(layer=KnowledgeLayer(layer_id="pool-layer", name="Pool"), claims=claims)
+        )
+        retriever = HybridGraphRAGRetriever(duck)
+        retriever.build_index("pool-layer")
+        ctx = retriever.retrieve(
+            "pool-layer",
+            "UniqueTokenAlpha Archive",
+            top_k=1,
+            hops=0,
+            candidate_pool_size=5,
+        )
+        assert [r.claim.claim_id for r in ctx.results] == ["clm_target_exact"]
+        assert ctx.results[0].semantic_score >= 0.0
