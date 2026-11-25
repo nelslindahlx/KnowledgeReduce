@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -24,7 +25,9 @@ from knowledgereduce.export import (
 from knowledgereduce.ingest import (
     AsyncWebCrawler,
     CrawlConfig,
+    ingest_local_directory,
     ingest_local_file,
+    read_jsonl_checkpoint,
     write_jsonl_checkpoint,
 )
 from knowledgereduce.map import (
@@ -54,7 +57,13 @@ from knowledgereduce.query import (
     central_nodes,
     detect_communities,
 )
-from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, adjudicate_conflict
+from knowledgereduce.reduce import (
+    ConflictResolutionDecision,
+    IntegrityValidator,
+    KnowledgeReducer,
+    adjudicate_conflict,
+    adjudicate_conflicts,
+)
 from knowledgereduce.security import ResolverFn, ensure_within_base
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, layer_data_to_networkx
@@ -216,6 +225,119 @@ def build_graph_analytics_payload(
     }
 
 
+def build_entity_inspection_payload(
+    store: GraphStore,
+    layer_id: str,
+    entity_id_or_name: str,
+    *,
+    max_claims: int = 25,
+    max_neighbors: int = 25,
+) -> dict[str, Any]:
+    """Return full entity details, linked claims, graph neighbors, conflicts, and sources."""
+    if max_claims < 1:
+        raise KnowledgeReduceError(f"max_claims must be >= 1 (got {max_claims}).")
+    if max_neighbors < 0:
+        raise KnowledgeReduceError(f"max_neighbors must be >= 0 (got {max_neighbors}).")
+
+    layer_data = store.load_layer(layer_id)
+    target = next((e for e in layer_data.entities if e.entity_id == entity_id_or_name), None)
+    if target is None:
+        norm_query = entity_id_or_name.strip().casefold()
+        target = next(
+            (
+                e
+                for e in layer_data.entities
+                if e.canonical_name.strip().casefold() == norm_query
+                or any(alias.strip().casefold() == norm_query for alias in e.aliases)
+            ),
+            None,
+        )
+    if target is None:
+        raise KnowledgeReduceError(f"Entity {entity_id_or_name!r} not found in layer {layer_id!r}.")
+
+    mentioned_claim_ids = {
+        rel.source_id
+        for rel in layer_data.relations
+        if rel.relation_type == "MENTIONS" and rel.target_id == target.entity_id
+    }
+    linked_claims = sorted(
+        (
+            clm
+            for clm in layer_data.claims
+            if clm.subject_id == target.entity_id
+            or clm.object_id == target.entity_id
+            or clm.claim_id in mentioned_claim_ids
+        ),
+        key=lambda clm: (-int(clm.reliability), -clm.confidence, clm.claim_id),
+    )
+    top_claims = linked_claims[:max_claims]
+
+    entity_by_id = {e.entity_id: e for e in layer_data.entities}
+    neighbors: list[dict[str, Any]] = []
+    for rel in layer_data.relations:
+        if rel.relation_type in {"MENTIONS", "CONTRADICTS"}:
+            continue
+        if rel.source_id == target.entity_id and rel.target_id in entity_by_id:
+            other = entity_by_id[rel.target_id]
+            direction = "outbound"
+        elif rel.target_id == target.entity_id and rel.source_id in entity_by_id:
+            other = entity_by_id[rel.source_id]
+            direction = "inbound"
+        else:
+            continue
+        neighbors.append(
+            {
+                "direction": direction,
+                "relation_type": rel.relation_type,
+                "confidence": rel.confidence,
+                "entity_id": other.entity_id,
+                "canonical_name": other.canonical_name,
+                "entity_type": other.entity_type,
+            }
+        )
+    neighbors.sort(
+        key=lambda item: (-float(item["confidence"]), item["relation_type"], item["entity_id"])
+    )
+    top_neighbors = neighbors[:max_neighbors]
+
+    all_linked_claim_ids = {clm.claim_id for clm in linked_claims}
+    related_conflicts = [
+        cf
+        for cf in layer_data.conflicts
+        if cf.target_key.startswith(f"{target.entity_id}::")
+        or cf.target_key == target.entity_id
+        or any(
+            str(cid) in all_linked_claim_ids
+            for cand in cf.candidates
+            for cid in (cand.get("claim_ids") or [])
+        )
+    ]
+
+    cited_source_ids = (
+        {ev.source_id for ev in target.evidence if ev.source_id}
+        | {clm.source_id for clm in linked_claims if clm.source_id}
+        | {ev.source_id for clm in linked_claims for ev in clm.evidence if ev.source_id}
+    )
+    sources_by_id = {src.source_id: src for src in layer_data.sources}
+    cited_sources = [
+        sources_by_id[sid].model_dump(mode="json")
+        for sid in sorted(cited_source_ids)
+        if sid in sources_by_id
+    ]
+
+    return {
+        "layer_id": layer_id,
+        "entity": target.model_dump(mode="json"),
+        "total_linked_claims": len(linked_claims),
+        "claims": [clm.model_dump(mode="json") for clm in top_claims],
+        "total_neighbors": len(neighbors),
+        "neighbors": top_neighbors,
+        "conflict_count": len(related_conflicts),
+        "conflicts": [cf.model_dump(mode="json") for cf in related_conflicts],
+        "sources": cited_sources,
+    }
+
+
 def create_mcp_server(
     workspace_dir: Path | str,
     *,
@@ -250,11 +372,12 @@ def create_mcp_server(
     @_mcp_error_boundary
     async def ingest_source(
         local_files: list[dict[str, Any]] | None = None,
+        local_directories: list[dict[str, Any]] | None = None,
         crawl_config: dict[str, Any] | None = None,
         checkpoint_name: str = "01_ingested.jsonl",
         incremental_from_layer: str | None = None,
     ) -> dict[str, Any]:
-        """Ingest local files and/or web URLs into a workspace JSONL checkpoint."""
+        """Ingest local files, local directories, and/or web URLs into a workspace JSONL checkpoint."""
         known_by_uri: dict[str, str] = {}
         known_by_source_id: dict[str, str] = {}
         if incremental_from_layer is not None:
@@ -287,6 +410,22 @@ def create_mcp_server(
                     base_dir=base,
                 )
             )
+        for item in local_directories or []:
+            raw_path = str(item.get("path", ""))
+            safe_dir = ensure_within_base(raw_path, base)
+            raw_patterns = item.get("patterns")
+            patterns = tuple(str(p) for p in raw_patterns) if raw_patterns else ("**/*",)
+            recursive = bool(item.get("recursive", True))
+            trust_weight = float(item.get("trust_weight", 0.75))
+            local_docs.extend(
+                ingest_local_directory(
+                    safe_dir,
+                    patterns=patterns,
+                    recursive=recursive,
+                    trust_weight=trust_weight,
+                    base_dir=base,
+                )
+            )
         if known_by_uri or known_by_source_id:
             kept_local, local_skipped = filter_unchanged_documents(
                 local_docs, known_by_uri, known_by_source_id
@@ -307,18 +446,67 @@ def create_mcp_server(
 
     @server.tool()
     @_mcp_error_boundary
+    def read_ingested_checkpoint(
+        checkpoint_name: str = "01_ingested.jsonl",
+        offset: int = 0,
+        limit: int = 20,
+        max_chars_per_doc: int = 4000,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read paginated ingested ``SourceDocument`` records from a workspace checkpoint."""
+        if offset < 0:
+            raise KnowledgeReduceError(f"offset must be >= 0 (got {offset}).")
+        if limit < 1 or limit > 200:
+            raise KnowledgeReduceError(f"limit must be between 1 and 200 (got {limit}).")
+        if max_chars_per_doc < 100:
+            raise KnowledgeReduceError(
+                f"max_chars_per_doc must be >= 100 (got {max_chars_per_doc})."
+            )
+
+        in_path = ensure_within_base(checkpoint_name, resolved_ckpt_dir)
+        docs = read_jsonl_checkpoint(in_path, SourceDocument)
+        filtered = [d for d in docs if source_id is None or d.source_id == source_id]
+        window = filtered[offset : offset + limit]
+        documents = [
+            {
+                "source_id": d.source_id,
+                "uri": d.uri,
+                "source_type": str(d.source_type),
+                "title": d.title,
+                "author": d.author,
+                "published_at": d.published_at.isoformat() if d.published_at else None,
+                "trust_weight": d.trust_weight,
+                "metadata": d.metadata,
+                "content_chars": len(d.content),
+                "truncated": len(d.content) > max_chars_per_doc,
+                "content": d.content[:max_chars_per_doc],
+            }
+            for d in window
+        ]
+        return {
+            "checkpoint_path": str(in_path.relative_to(base)),
+            "total_documents": len(filtered),
+            "returned_count": len(documents),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(window) < len(filtered),
+            "documents": documents,
+        }
+
+    @server.tool()
+    @_mcp_error_boundary
     def run_local_map(
         ingested_checkpoint: str = "01_ingested.jsonl",
         mapped_checkpoint: str = "02_mapped.jsonl",
         mapper: str = "deterministic",
         min_sentence_length: int = 25,
+        skip_headings: bool = True,
+        skip_questions: bool = True,
         spacy_model: str = "en_core_web_sm",
     ) -> dict[str, Any]:
         """Map an ingested checkpoint locally into entities, claims, and relations."""
         in_path = ensure_within_base(ingested_checkpoint, resolved_ckpt_dir)
         out_path = ensure_within_base(mapped_checkpoint, resolved_ckpt_dir)
-
-        from knowledgereduce.ingest import read_jsonl_checkpoint
 
         docs = read_jsonl_checkpoint(in_path, SourceDocument)
         cfg = PipelineConfig(
@@ -327,6 +515,8 @@ def create_mcp_server(
             store_dir=str(resolved_store_dir),
             mapper=mapper,
             min_sentence_length=min_sentence_length,
+            skip_headings=skip_headings,
+            skip_questions=skip_questions,
             spacy_model=spacy_model,
         )
         runner = PipelineRunner(store=store)
@@ -411,6 +601,7 @@ def create_mcp_server(
         conflict_strategy: str = "preserve_dispute",
         tier: str = "stacked",
         reconcile: bool = False,
+        deduplicate_claims: bool = True,
         build_embeddings_index: bool = True,
         overwrite: bool = False,
     ) -> dict[str, Any]:
@@ -423,6 +614,7 @@ def create_mcp_server(
             tier=LayerTier(tier),
             conflict_strategy=ConflictStrategy(conflict_strategy),
             reconcile=reconcile,
+            deduplicate_claims=deduplicate_claims,
             overwrite=overwrite,
         )
         if build_embeddings_index and stacked.claims:
@@ -527,6 +719,31 @@ def create_mcp_server(
 
     @server.tool()
     @_mcp_error_boundary
+    def resolve_conflicts(
+        base_layer_id: str,
+        target_layer_id: str,
+        resolutions: list[dict[str, Any]],
+        default_notes: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically adjudicate a batch of conflicts into a single CURATED child layer."""
+        decisions = [ConflictResolutionDecision.model_validate(item) for item in resolutions]
+        base_data = store.load_layer(base_layer_id)
+        curated, resolved = adjudicate_conflicts(
+            base_data,
+            decisions=decisions,
+            target_layer_id=target_layer_id,
+            default_notes=default_notes or "Adjudicated via MCP resolve_conflicts.",
+        )
+        store.save_layer(curated, overwrite=overwrite)
+        return {
+            "layer": curated.layer.model_dump(mode="json"),
+            "resolved_count": len(resolved),
+            "resolved_conflicts": [cf.model_dump(mode="json") for cf in resolved],
+        }
+
+    @server.tool()
+    @_mcp_error_boundary
     def export_layer(
         layer_id: str,
         format: str,
@@ -612,6 +829,91 @@ def create_mcp_server(
             path_source_id=path_source_id,
             path_target_id=path_target_id,
             max_hops=max_hops,
+        )
+
+    @server.tool()
+    @_mcp_error_boundary
+    def inspect_entity(
+        layer_id: str,
+        entity_id_or_name: str,
+        max_claims: int = 25,
+        max_neighbors: int = 25,
+    ) -> dict[str, Any]:
+        """Inspect an entity by ID, canonical name, or alias with claims, neighbors, conflicts, and sources."""
+        return build_entity_inspection_payload(
+            store,
+            layer_id,
+            entity_id_or_name,
+            max_claims=max_claims,
+            max_neighbors=max_neighbors,
+        )
+
+    @server.resource(
+        "kr://layers",
+        name="layers_catalog",
+        description="Serialized summary of all persisted knowledge layers in the store.",
+        mime_type="application/json",
+    )
+    def layers_catalog_resource() -> str:
+        return json.dumps(build_layers_payload(store), indent=2)
+
+    @server.resource(
+        "kr://layers/{layer_id}/manifest",
+        name="layer_manifest",
+        description="Metadata manifest for a stored knowledge layer.",
+        mime_type="application/json",
+    )
+    def layer_manifest_resource(layer_id: str) -> str:
+        return json.dumps(store.get_layer_manifest(layer_id).model_dump(mode="json"), indent=2)
+
+    @server.resource(
+        "kr://layers/{layer_id}/conflicts",
+        name="layer_open_conflicts",
+        description="Open conflict records awaiting review in a stored knowledge layer.",
+        mime_type="application/json",
+    )
+    def layer_conflicts_resource(layer_id: str) -> str:
+        open_conflicts = store.list_conflicts(layer_id, needs_review=True, limit=200)
+        return json.dumps(
+            {
+                "layer_id": layer_id,
+                "count": len(open_conflicts),
+                "conflicts": [cf.model_dump(mode="json") for cf in open_conflicts],
+            },
+            indent=2,
+        )
+
+    @server.prompt(
+        name="extract_mapped_batch",
+        description="Guide an agent to extract structured entities, claims, and relations from an ingested checkpoint.",
+    )
+    def extract_mapped_batch_prompt(
+        checkpoint_path: str = "01_ingested.jsonl",
+        source_id: str | None = None,
+    ) -> str:
+        target_clause = (
+            f"Pass `source_id={source_id!r}` to focus on that source."
+            if source_id
+            else "Paginate with `offset` and `limit` until `has_more` is false."
+        )
+        return (
+            f"1. Call `read_ingested_checkpoint` on `{checkpoint_path}` ({target_clause}).\n"
+            "2. Extract normalized `entities` (with canonical_name, aliases, entity_type, evidence), "
+            "`claims` (grounded statement, subject_id, predicate, object_id or object_literal, reliability 1..5, evidence), "
+            "and `relations` referencing valid entity/claim IDs.\n"
+            "3. Submit each extracted `MappedBatch` via `submit_mapped_batch` and persist with `resolve_and_reduce`."
+        )
+
+    @server.prompt(
+        name="adjudicate_conflicts",
+        description="Guide an agent through reviewing open conflicts and submitting atomic batch resolutions.",
+    )
+    def adjudicate_conflicts_prompt(layer_id: str) -> str:
+        return (
+            f"1. Inspect open disputes via `kr://layers/{layer_id}/conflicts` or `list_conflicts(layer_id={layer_id!r})`.\n"
+            "2. For any disputed subject entity, call `inspect_entity` to examine corroborating claims, sources, and reliability.\n"
+            f"3. Submit one atomic batch via `resolve_conflicts(base_layer_id={layer_id!r}, target_layer_id=..., resolutions=[...])` "
+            "and verify zero remaining `open_conflicts` in the new CURATED layer."
         )
 
     return server

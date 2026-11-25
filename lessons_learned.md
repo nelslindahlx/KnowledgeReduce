@@ -81,3 +81,15 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 ## Lesson 13: Pre-Registration Claim Hygiene & Structural Grounding Quality Weights
 - **Symptom**: Real-world *Civic Honors: The Book* evaluation surfaced `37` unpunctuated chapter/section headings and `10` rhetorical `?` questions still emitted as `Claim` nodes, while single-document grounded `(S, P, O)` claims scored almost identically (`59.51` vs `57.43`) to ungrounded sentences.
 - **Resolution & Guard**: Filter heading lines into downstream `contextual_notes = "Section: ..."` provenance and exclude `?` questions before Pass-1 entity registration when `skip_headings=True` / `skip_questions=True` in `DeterministicNLPMapper` (`src/knowledgereduce/map/nlp.py`), add bounded `+5.0`/`+2.5` structural grounding weights to `Claim.quality_score` (`src/knowledgereduce/models/schemas.py`), lock expectations in `tests/unit/test_models.py` and `tests/unit/test_map_resolve_reduce.py`, and verify stacked multi-source behavior in `benchmarks/multisource_stack_benchmark.py` and `tests/golden/test_multisource_stack_golden.py`.
+
+---
+
+## Lesson 14: Parameterized DuckDB SQL Pushdown, Metadata-Only Reads & Atomic Backup-Swap Writes
+- **Bottleneck**: Filtering or paginating top-k claims in `QueryBuilder.execute_claims()` hydrated up to `100,000` full `Claim` models into Python before sorting/slicing (`1,004.6 ms` at `50K` claims), incremental hash lookups loaded entire layers via `load_layer()`, and `DuckDBParquetStore.save_layer()` removed existing target directories prior to renaming a fixed staging directory.
+- **Resolution & Guard**: Push `tags_any` (`list_has_any`), UTC range filters (`TRY_CAST(... AS TIMESTAMPTZ)`), `subject_id`/`predicate`/`source_id`, allowlisted `sort_by`, and `LIMIT`/`OFFSET` into `DuckDBParquetStore.list_claims()` and `MemoryGraphStore.list_claims()` (`6.82 ms` median top-10 at `50K` claims), expose metadata-only `get_layer_manifest()`/`list_source_hashes()`, serialize `save_layer()` with `_write_lock` + unique `.staging_` dirs + backup-swap rollback (`src/knowledgereduce/storage/duckdb_store.py`, `src/knowledgereduce/query/builder.py`), and verify behavior in `tests/unit/test_storage.py` and `tests/unit/test_query.py`.
+
+---
+
+## Lesson 15: Guarded Shared Claims During Atomic Batch Conflict Adjudication
+- **Risk Identified**: Clearing `needs_review=False` or removing all `CONTRADICTS` edges for every participating claim ID in a resolved conflict can clear flags prematurely when the same claim participates in another still-open dispute.
+- **Resolution & Guard**: Compute per-conflict resolved claim sets alongside remaining unresolved conflict claim sets in `adjudicate_conflicts()` (`src/knowledgereduce/reduce/conflicts.py`), clearing `needs_review` and removing `CONTRADICTS` edges only when the claim/edge no longer belongs to any open `needs_review=True` conflict, locked by multi-conflict regression tests in `tests/unit/test_map_resolve_reduce.py`.

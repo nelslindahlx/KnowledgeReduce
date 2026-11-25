@@ -19,7 +19,12 @@ from knowledgereduce.models import (
     SourceType,
     ValidationReport,
 )
-from knowledgereduce.pipeline import LocalFileSourceConfig, PipelineConfig, PipelineRunner
+from knowledgereduce.pipeline import (
+    LocalDirectorySourceConfig,
+    LocalFileSourceConfig,
+    PipelineConfig,
+    PipelineRunner,
+)
 from knowledgereduce.query import (
     HybridGraphRAGRetriever,
     QueryBuilder,
@@ -28,16 +33,23 @@ from knowledgereduce.query import (
     detect_communities,
     k_hop_neighborhood,
 )
-from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer, adjudicate_conflict
+from knowledgereduce.reduce import (
+    ConflictResolutionDecision,
+    IntegrityValidator,
+    KnowledgeReducer,
+    adjudicate_conflict,
+    adjudicate_conflicts,
+)
 from knowledgereduce.resolve import HashingEmbeddingProvider
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 __all__ = [
     "Claim",
     "ConflictRecord",
+    "ConflictResolutionDecision",
     "ConflictStrategy",
     "DuckDBParquetStore",
     "Entity",
@@ -51,6 +63,7 @@ __all__ = [
     "LayerData",
     "LayerDiff",
     "LayerTier",
+    "LocalDirectorySourceConfig",
     "LocalFileSourceConfig",
     "MappedBatch",
     "MemoryGraphStore",
@@ -66,6 +79,7 @@ __all__ = [
     "ValidationReport",
     "__version__",
     "adjudicate_conflict",
+    "adjudicate_conflicts",
     "app",
     "bounded_shortest_path",
     "central_nodes",

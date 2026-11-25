@@ -577,3 +577,196 @@ def test_cli_ingest_directory_and_glob(tmp_path: Path) -> None:
     assert len(lines) == 1
     assert '"source_type":"markdown"' in lines[0]
     assert '"cli"' in lines[0]
+
+
+def test_cli_resolve_conflicts_inspect_and_doctor(tmp_path: Path) -> None:
+    import json
+
+    from knowledgereduce.models import (
+        Claim,
+        ConflictRecord,
+        Entity,
+        KnowledgeLayer,
+        LayerData,
+        Relation,
+        SourceDocument,
+        SourceType,
+    )
+    from knowledgereduce.storage import DuckDBParquetStore
+
+    runner = CliRunner()
+    empty_store = tmp_path / "uninit_store"
+    doc_empty = runner.invoke(app, ["doctor", "-s", str(empty_store), "--json-output"])
+    assert doc_empty.exit_code == 0, doc_empty.output
+    empty_payload = json.loads(doc_empty.output)
+    assert empty_payload["store"]["exists"] is False
+    assert empty_payload["store"]["layer_count"] == 0
+    assert not empty_store.exists()
+
+    store_dir = tmp_path / "cli_phase4_store"
+    layer_data = LayerData(
+        layer=KnowledgeLayer(layer_id="cli-base", name="CLI Base"),
+        sources=[
+            SourceDocument(
+                source_id="src_1",
+                uri="https://example.org/a",
+                source_type=SourceType.WEB,
+                title="Source A",
+                content="Civic Honors was published in 2006 in Lawrence.",
+            )
+        ],
+        entities=[
+            Entity(
+                entity_id="ent_ch",
+                canonical_name="Civic Honors",
+                entity_type="ORG",
+                aliases=["CH Book"],
+            ),
+            Entity(entity_id="ent_law", canonical_name="Lawrence", entity_type="GPE"),
+        ],
+        claims=[
+            Claim(
+                claim_id="clm_1",
+                statement="Civic Honors was published in 2006.",
+                source_id="src_1",
+                subject_id="ent_ch",
+                predicate="PUBLISHED_IN",
+                object_literal="2006",
+                needs_review=True,
+            ),
+            Claim(
+                claim_id="clm_2",
+                statement="Civic Honors was published in 2020.",
+                source_id="src_1",
+                subject_id="ent_ch",
+                predicate="PUBLISHED_IN",
+                object_literal="2020",
+                needs_review=True,
+            ),
+        ],
+        relations=[
+            Relation(
+                relation_id="rel_ent",
+                source_id="ent_ch",
+                target_id="ent_law",
+                relation_type="LOCATED_IN",
+            ),
+            Relation(
+                relation_id="rel_cf",
+                source_id="clm_1",
+                target_id="clm_2",
+                relation_type="CONTRADICTS",
+            ),
+        ],
+        conflicts=[
+            ConflictRecord(
+                conflict_id="cf_1",
+                target_type="claim",
+                target_key="ent_ch::PUBLISHED_IN",
+                candidates=[
+                    {"value": "2006", "claim_ids": ["clm_1"]},
+                    {"value": "2020", "claim_ids": ["clm_2"]},
+                ],
+                needs_review=True,
+            )
+        ],
+    )
+    with DuckDBParquetStore(store_dir) as store:
+        store.save_layer(layer_data)
+
+    inspect_json = runner.invoke(
+        app,
+        ["inspect", "cli-base", "ch book", "--json-output", "-s", str(store_dir)],
+    )
+    assert inspect_json.exit_code == 0, inspect_json.output
+    insp_data = json.loads(inspect_json.output)
+    assert insp_data["entity"]["entity_id"] == "ent_ch"
+    assert insp_data["total_linked_claims"] == 2
+    assert insp_data["total_neighbors"] == 1
+    assert insp_data["conflict_count"] == 1
+
+    inspect_text = runner.invoke(
+        app,
+        ["inspect", "cli-base", "Civic Honors", "-s", str(store_dir)],
+    )
+    assert inspect_text.exit_code == 0, inspect_text.output
+    assert "Civic Honors (ent_ch, ORG)" in inspect_text.output
+
+    inspect_missing = runner.invoke(
+        app,
+        ["inspect", "cli-base", "nonexistent-entity", "-s", str(store_dir)],
+    )
+    assert inspect_missing.exit_code == 1
+
+    decisions_path = tmp_path / "decisions.json"
+    decisions_path.write_text(
+        json.dumps(
+            {
+                "resolutions": [
+                    {
+                        "conflict_id": "cf_1",
+                        "winning_value": "2006",
+                        "winning_source_id": "src_1",
+                        "resolution_notes": "Verified original print date.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc_res = runner.invoke(
+        app,
+        [
+            "resolve-conflicts",
+            "cli-base",
+            "-d",
+            str(decisions_path),
+            "-t",
+            "cli-curated",
+            "-s",
+            str(store_dir),
+        ],
+    )
+    assert rc_res.exit_code == 0, rc_res.output
+    rc_payload = json.loads(rc_res.output)
+    assert rc_payload["resolved_count"] == 1
+    assert rc_payload["layer"]["tier"] == "curated"
+
+    bad_decisions = tmp_path / "bad_decisions.json"
+    bad_decisions.write_text('{"wrong": 1}', encoding="utf-8")
+    assert (
+        runner.invoke(
+            app,
+            [
+                "resolve-conflicts",
+                "cli-base",
+                "-d",
+                str(bad_decisions),
+                "-t",
+                "cli-err",
+                "-s",
+                str(store_dir),
+            ],
+        ).exit_code
+        == 1
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "resolve-conflicts",
+                "cli-base",
+                "-d",
+                str(tmp_path / "missing_decisions.json"),
+                "-t",
+                "cli-err2",
+                "-s",
+                str(store_dir),
+            ],
+        ).exit_code
+        == 1
+    )
+
+    doc_ready = runner.invoke(app, ["doctor", "-s", str(store_dir)])
+    assert doc_ready.exit_code == 0, doc_ready.output
+    assert "ready (2 layers)" in doc_ready.output

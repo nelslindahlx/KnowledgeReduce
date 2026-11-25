@@ -61,10 +61,11 @@ Each layer is stored atomically inside `<store_dir>/layers/<layer_id>/`:
 └── claim_embeddings.parquet   # optional persisted L2-normalized claim vector index (created on build_index/first query)
 ```
 
-- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)`, `UNNEST(?::VARCHAR[])`, `list_filter(?::VARCHAR[], ...)`, `?` placeholders — zero SQL string interpolation) over a thread-safe persistent `:memory:` DuckDB read session (`_read_con`, guarded by `_con_lock`), paired with `(st_mtime_ns, st_size)`-validated `ClaimSummary` and bounded layer-graph caches evicted automatically on layer writes and deletes.
+- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)`, `UNNEST(?::VARCHAR[])`, `list_has_any(...)`, `TRY_CAST(... AS TIMESTAMPTZ)`, allowlisted `sort_by`, `?` placeholders — zero SQL string interpolation) over a thread-safe persistent `:memory:` DuckDB read session (`_read_con`, guarded by `_con_lock`). `list_claims()` and `QueryBuilder.execute_claims()` push `tags_any`, date/published ranges, `subject_id`/`predicate`/`source_id`, sorting, and `LIMIT`/`OFFSET` directly into DuckDB SQL, while `get_layer_manifest()` and `list_source_hashes()` read metadata without loading claims/relations into memory.
+- `DuckDBParquetStore.save_layer()` serializes writes via `_write_lock` into unique `.staging_` directories and swaps overwrites atomically with backup rollback.
 - `HybridGraphRAGRetriever` persists `FixedSizeListArray` `claim_embeddings.parquet` zero-copy vector indices for stateless embedding providers (`HashingEmbeddingProvider`, `SentenceTransformerProvider`), scores lightweight `ClaimSummary` projections first, hydrates full `Claim` models only for `top_k` winners, and expands graph context via `get_k_hop_subgraph` without loading entire large layers into memory.
 - Empty tables preserve full PyArrow schemas.
-- Overwriting an existing immutable layer requires explicit `overwrite=True` (which cleanly invalidates any prior `claim_embeddings.parquet`).
+- Overwriting an existing immutable layer requires explicit `overwrite=True` (which cleanly invalidates any prior `claim_embeddings.parquet` and `(st_mtime_ns, st_size)` caches).
 
 ---
 
@@ -74,7 +75,7 @@ Each layer is stored atomically inside `<store_dir>/layers/<layer_id>/`:
 - **`UNION`**: Combines all entities, claims, and relations across layers, merging matching IDs with provenance preservation.
 - **`INTERSECTION`**: Retains entities, claims, and relations present across all input layers.
 - **`DIFFERENCE`**: Subtracts subsequent layers from `layer_ids[0]` and automatically removes dangling relations whose endpoints were removed.
-- **Cross-Layer Reconciliation (`reconcile=True`)**: Available on `UNION` and `OVERLAY` to disambiguate equivalent entities with different IDs across independently generated layers, remap endpoints, surface cross-layer functional conflicts, and run `IntegrityValidator` strictly.
+- **Cross-Layer Reconciliation (`reconcile=True`, `deduplicate_claims=True`)**: Available on `UNION` and `OVERLAY` to disambiguate equivalent entities across independently generated layers, deduplicate semantically equivalent claims with distinct IDs via shared `deduplicate_and_merge_claims()`, remap endpoints cleanly, surface cross-layer functional conflicts, and run `IntegrityValidator` strictly.
 - **Lineage DAG**: `build_lineage_graph()`, `get_ancestors()`, and `get_descendants()` traverse `parent_layer_ids` non-destructively.
 
 ---

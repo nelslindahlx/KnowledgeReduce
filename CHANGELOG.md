@@ -4,8 +4,27 @@ All notable changes to KnowledgeReduce are documented in this file.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-25
+
+### Added
+- **Phase 1: DuckDB SQL Pushdown, Metadata-Only Reads & Crash-Safe `save_layer` (`#53`)**:
+  - Extended `GraphStore.list_claims()`, `DuckDBParquetStore.list_claims()`, `MemoryGraphStore.list_claims()`, and `QueryBuilder` (`filter_published_range`, `filter_subject`, `filter_predicate`, `filter_source`, `execute_claims()`) with parameterized SQL / native pushdown for `tags_any` (`list_has_any`), date ranges (`TRY_CAST(... AS TIMESTAMPTZ)`), sorting, and `LIMIT`/`OFFSET` (cutting uninstrumented `50K`-claim top-10 queries from `1,004.6 ms` to `6.82 ms` median).
+  - Added metadata-only `get_layer_manifest()` and `list_source_hashes()` wired into `load_layer_source_hashes()` and `build_layer_lineage_payload()`.
+  - Hardened `DuckDBParquetStore.save_layer()` with `_write_lock`, unique `.staging_` temp directories, and atomic backup-swap rollback on overwrite failures, eliminated per-query `id_to_sem` allocation in `HybridGraphRAGRetriever.retrieve()`, and made golden timing checks coverage-aware.
+- **Phase 2: `StackManager` Cross-Layer Claim Dedup & `PipelineRunner` Parity (`#54`)**:
+  - Exported shared `deduplicate_and_merge_claims()`, `merge_claim_cluster()`, and `deduplicate_relations()` in `src/knowledgereduce/reduce/reducer.py` and added `deduplicate_claims: bool = True`, `semantic_threshold`, and `min_claim_length` to `StackManager.merge_layers()` and `stack_overlay()` under `reconcile=True`.
+  - Added `skip_headings` and `skip_questions` to `PipelineConfig`, forwarded `structured_config`, `skip_headings`, and `skip_questions` in `_map_single_doc_worker()`, added `PipelineRunner._open_store()`, and wrapped `DuckDBParquetStore` instances in `with ... as store:` across `src/knowledgereduce/cli.py`.
+- **Phase 3: Directory/Glob Ingest, Optional `PDFConnector` & Markdown Frontmatter (`#55`)**:
+  - Added `SourceType.PDF = "pdf"`, optional `[pdf]` extra (`pypdf>=5.0` in `pyproject.toml` + `uv.lock`), and path-sandboxed `PDFConnector`.
+  - Added symlink-safe `DirectoryConnector` and `ingest_local_directory()`, `LocalDirectorySourceConfig` / `PipelineConfig.local_directories`, and `kr ingest --dir --glob`.
+  - Parsed Markdown frontmatter `published_at`/`date` and normalized `tags` in `MarkdownConnector`, propagating document tags onto emitted `Claim.tags` in `DeterministicNLPMapper.map_document()`.
+- **Phase 4: Atomic Batch Conflicts, Agent-Complete 17-Tool MCP & CLI Ergonomics (`#56`)**:
+  - Added `ConflictResolutionDecision` and `adjudicate_conflicts()` in `src/knowledgereduce/reduce/conflicts.py` (preserving `needs_review=True` and `CONTRADICTS` edges for claims still participating in remaining open conflicts).
+  - Expanded MCP server (`14 -> 17` tools) with `read_ingested_checkpoint`, `inspect_entity`, and `resolve_conflicts`, wired `local_directories` / `skip_headings` / `skip_questions` / `deduplicate_claims`, and registered 3 `@server.resource` endpoints (`kr://layers`, `kr://layers/{layer_id}/manifest`, `kr://layers/{layer_id}/conflicts`) plus 2 `@server.prompt` templates (`extract_mapped_batch`, `adjudicate_conflicts`).
+  - Added CLI commands `kr resolve-conflicts`, `kr inspect`, and `kr doctor`, bumped SemVer to `1.6.0` across `pyproject.toml`, `src/knowledgereduce/__init__.py`, `docs/paper/CITATION.cff`, `tests/unit/test_smoke.py`, and `uv.lock`, and synchronized repository docs & governance parity.
+
 ### Changed
-- Synchronized repository governance, CI documentation, `docs/paper/CITATION.cff` (`1.5.0`), and `Makefile` clean/gate parity (`--cov-fail-under=95` across `AGENTS.md`, `.agents/AGENTS.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md`, and `.github/workflows/ci.yml`), updated `docs/architecture.md` with structural grounding weights and persistent DuckDB session/projection cache architecture, and expanded `tests/meta/test_governance_and_invariants.py` with `CITATION.cff`, coverage-gate parity, and `README.md`/`docs/*.md` local-path checks.
+- Synchronized repository governance, CI documentation, `docs/paper/CITATION.cff`, and `Makefile` clean/gate parity (`--cov-fail-under=95` across `AGENTS.md`, `.agents/AGENTS.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md`, and `.github/workflows/ci.yml`).
 
 ## [1.5.0] - 2026-11-24
 

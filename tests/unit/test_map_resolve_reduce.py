@@ -735,3 +735,128 @@ def test_deterministic_nlp_mapper_filters_headings_questions_and_propagates_sect
     assert any(s.startswith("Chapter 1:") for s in raw_stmts)
     assert any(s.endswith("?") for s in raw_stmts)
     assert len(raw_batch.claims) == 4
+
+
+def test_adjudicate_conflicts_batch_atomicity_and_shared_claim_guards() -> None:
+    from knowledgereduce.models import (
+        ConflictRecord,
+        ConflictResolutionError,
+        Entity,
+        KnowledgeLayer,
+        LayerData,
+    )
+    from knowledgereduce.reduce import (
+        ConflictResolutionDecision,
+        IntegrityValidator,
+        adjudicate_conflicts,
+    )
+
+    e1 = Entity(entity_id="ent_1", canonical_name="Civic Honors", entity_type="ORG")
+    e2 = Entity(entity_id="ent_2", canonical_name="Lawrence", entity_type="GPE")
+    c1 = Claim(
+        claim_id="c1",
+        statement="Civic Honors was published in 2006.",
+        subject_id="ent_1",
+        predicate="PUBLISHED_IN",
+        object_literal="2006",
+        needs_review=True,
+    )
+    c2 = Claim(
+        claim_id="c2",
+        statement="Civic Honors was published in 2020 in Lawrence.",
+        subject_id="ent_1",
+        predicate="PUBLISHED_IN",
+        object_literal="2020",
+        needs_review=True,
+    )
+    c3 = Claim(
+        claim_id="c3",
+        statement="Civic Honors is located in Kansas City.",
+        subject_id="ent_1",
+        predicate="LOCATED_IN",
+        object_literal="Kansas City",
+        needs_review=True,
+    )
+    r12 = Relation(
+        relation_id="rel_12", source_id="c1", target_id="c2", relation_type="CONTRADICTS"
+    )
+    r23 = Relation(
+        relation_id="rel_23", source_id="c2", target_id="c3", relation_type="CONTRADICTS"
+    )
+
+    cf1 = ConflictRecord(
+        conflict_id="cf_year",
+        target_type="claim",
+        target_key="ent_1::PUBLISHED_IN",
+        candidates=[{"value": "2006", "claim_ids": ["c1"]}, {"value": "2020", "claim_ids": ["c2"]}],
+        needs_review=True,
+    )
+    cf2 = ConflictRecord(
+        conflict_id="cf_loc",
+        target_type="claim",
+        target_key="ent_1::LOCATED_IN",
+        candidates=[
+            {"value": "Lawrence", "claim_ids": ["c2"]},
+            {"value": "Kansas City", "claim_ids": ["c3"]},
+        ],
+        needs_review=True,
+    )
+
+    base = LayerData(
+        layer=KnowledgeLayer(layer_id="base-batch", name="Base Batch"),
+        entities=[e1, e2],
+        claims=[c1, c2, c3],
+        relations=[r12, r23],
+        conflicts=[cf1, cf2],
+    )
+
+    with pytest.raises(ConflictResolutionError, match="at least one"):
+        adjudicate_conflicts(base, decisions=[], target_layer_id="err-empty")
+
+    with pytest.raises(ConflictResolutionError, match="Duplicate conflict_id"):
+        adjudicate_conflicts(
+            base,
+            decisions=[
+                ConflictResolutionDecision(conflict_id="cf_year", winning_value="2006"),
+                ConflictResolutionDecision(conflict_id="cf_year", winning_value="2006"),
+            ],
+            target_layer_id="err-dup",
+        )
+
+    with pytest.raises(ConflictResolutionError, match="not found"):
+        adjudicate_conflicts(
+            base,
+            decisions=[ConflictResolutionDecision(conflict_id="missing_cf", winning_value="x")],
+            target_layer_id="err-missing",
+        )
+
+    # Resolving only cf_year keeps shared c2 marked needs_review=True and preserves rel_23.
+    partial, resolved_partial = adjudicate_conflicts(
+        base,
+        decisions=[ConflictResolutionDecision(conflict_id="cf_year", winning_value="2006")],
+        target_layer_id="cur-partial",
+    )
+    assert len(resolved_partial) == 1
+    claims_partial = {c.claim_id: c for c in partial.claims}
+    assert claims_partial["c1"].needs_review is False
+    assert claims_partial["c2"].needs_review is True
+    assert claims_partial["c3"].needs_review is True
+    assert {r.relation_id for r in partial.relations} == {"rel_23"}
+    assert partial.layer.stats["open_conflicts"] == 1
+
+    # Resolving both atomically clears all needs_review flags and CONTRADICTS edges cleanly.
+    curated, resolved_all = adjudicate_conflicts(
+        base,
+        decisions=[
+            ConflictResolutionDecision(conflict_id="cf_year", winning_value="2006"),
+            ConflictResolutionDecision(conflict_id="cf_loc", winning_value="Lawrence"),
+        ],
+        target_layer_id="cur-atomic",
+    )
+    assert len(resolved_all) == 2
+    assert all(not c.needs_review for c in curated.claims)
+    assert all(not cf.needs_review for cf in curated.conflicts)
+    assert curated.relations == []
+    assert curated.layer.stats["open_conflicts"] == 0
+    assert curated.layer.stats["resolved_conflict_ids"] == ["cf_year", "cf_loc"]
+    assert IntegrityValidator().validate(curated, strict=True).valid is True
