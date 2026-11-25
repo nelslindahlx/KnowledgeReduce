@@ -24,6 +24,7 @@ class SourceType(StrEnum):
     JSONL = "jsonl"
     MARKDOWN = "markdown"
     HTML = "html"
+    PDF = "pdf"
     TEXT = "text"
     AGENT = "agent"
     UNKNOWN = "unknown"

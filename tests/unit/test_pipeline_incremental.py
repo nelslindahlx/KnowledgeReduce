@@ -10,7 +10,12 @@ from pydantic import ValidationError
 
 from knowledgereduce.ingest import CrawlConfig
 from knowledgereduce.models import StorageError
-from knowledgereduce.pipeline import LocalFileSourceConfig, PipelineConfig, PipelineRunner
+from knowledgereduce.pipeline import (
+    LocalDirectorySourceConfig,
+    LocalFileSourceConfig,
+    PipelineConfig,
+    PipelineRunner,
+)
 from knowledgereduce.query import HybridGraphRAGRetriever
 from knowledgereduce.reduce import IntegrityValidator
 from knowledgereduce.resolve import HashingEmbeddingProvider
@@ -317,3 +322,57 @@ def test_pipeline_parallel_worker_config_parity_and_store_lifecycle(
     )
     assert len(closed_stores) == before
     explicit.close()
+
+
+def test_pipeline_local_directories_incremental_delta(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs_dir"
+    nested = docs_dir / "nested"
+    nested.mkdir(parents=True)
+    (docs_dir / "alpha.md").write_text(
+        "---\ntitle: Alpha\ntags: [civic]\n---\n\n"
+        "Nels Lindahl launched Civic Honors in Lawrence to organize civic workshops.\n",
+        encoding="utf-8",
+    )
+    (nested / "ignore.txt").write_text("Ignored extension under *.md pattern.", encoding="utf-8")
+
+    store_dir = tmp_path / "dir_store"
+    cfg_v1 = PipelineConfig(
+        layer_id="dir-v1",
+        layer_name="Dir V1",
+        store_dir=str(store_dir),
+        local_directories=[
+            LocalDirectorySourceConfig(
+                path=str(docs_dir),
+                patterns=["**/*.md"],
+                recursive=True,
+                trust_weight=0.85,
+            )
+        ],
+        min_sentence_length=15,
+        min_claim_length=15,
+        build_embeddings_index=False,
+    )
+    runner = PipelineRunner()
+    v1_data = runner.run(cfg_v1)
+    assert len(v1_data.sources) == 1
+    assert v1_data.claims
+    assert all("civic" in clm.tags for clm in v1_data.claims)
+
+    # Incremental second run before any changes skips all unchanged docs.
+    cfg_v2 = cfg_v1.model_copy(
+        update={
+            "layer_id": "dir-v2",
+            "layer_name": "Dir V2",
+            "incremental_from_layer": "dir-v1",
+        }
+    )
+    assert runner.ingest(cfg_v2) == []
+
+    # Add a new markdown file; delta ingest captures only the new document.
+    (nested / "beta.md").write_text(
+        "Civic Honors collaborated with Kansas educators in Lawrence during 2008.\n",
+        encoding="utf-8",
+    )
+    delta_docs = runner.ingest(cfg_v2)
+    assert len(delta_docs) == 1
+    assert delta_docs[0].title == "beta"

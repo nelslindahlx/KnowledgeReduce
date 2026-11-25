@@ -551,3 +551,29 @@ def test_cli_structured_query_exports_analytics_and_error_branches(tmp_path: Pat
     ]:
         res_err = runner.invoke(app, argv)
         assert res_err.exit_code == 1, f"Expected exit 1 for {argv}: {res_err.output}"
+
+
+def test_cli_ingest_directory_and_glob(tmp_path: Path) -> None:
+    runner = CliRunner()
+    empty_res = runner.invoke(app, ["ingest", "-o", str(tmp_path / "empty.jsonl")])
+    assert empty_res.exit_code == 1
+    assert "--dir" in empty_res.output
+
+    corpus = tmp_path / "cli_corpus"
+    corpus.mkdir()
+    (corpus / "keep.md").write_text(
+        "---\ndate: 2025-01-10\ntags: [cli, ingest]\n---\n\nKept markdown body.",
+        encoding="utf-8",
+    )
+    (corpus / "skip.txt").write_text("Excluded by --glob *.md.", encoding="utf-8")
+
+    out_ckpt = tmp_path / "dir_ingest.jsonl"
+    res = runner.invoke(
+        app,
+        ["ingest", "--dir", str(corpus), "--glob", "*.md", "-o", str(out_ckpt)],
+    )
+    assert res.exit_code == 0, res.output
+    lines = [line for line in out_ckpt.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert '"source_type":"markdown"' in lines[0]
+    assert '"cli"' in lines[0]

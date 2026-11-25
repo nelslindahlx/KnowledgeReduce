@@ -12,6 +12,7 @@ import structlog
 
 from knowledgereduce.ingest import (
     WebConnector,
+    ingest_local_directory,
     ingest_local_file,
     read_jsonl_checkpoint,
     write_jsonl_checkpoint,
@@ -185,6 +186,15 @@ class PipelineRunner:
                     file_cfg.path,
                     source_id=file_cfg.source_id,
                     trust_weight=file_cfg.trust_weight,
+                )
+            )
+        for dir_cfg in config.local_directories:
+            local_docs.extend(
+                ingest_local_directory(
+                    dir_cfg.path,
+                    patterns=dir_cfg.patterns,
+                    recursive=dir_cfg.recursive,
+                    trust_weight=dir_cfg.trust_weight,
                 )
             )
         if known_by_uri or known_by_source_id:

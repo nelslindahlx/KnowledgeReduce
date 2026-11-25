@@ -1210,6 +1210,13 @@ class DeterministicNLPMapper:
         """Extract entities, claims, and grounded relations using two-pass document linking."""
         default_reliability = _reliability_from_trust(doc.trust_weight)
         base_conf = min(1.0, max(0.5, doc.trust_weight))
+        raw_doc_tags = doc.metadata.get("tags")
+        if isinstance(raw_doc_tags, (list, tuple)):
+            doc_tags = [t.strip() for t in raw_doc_tags if isinstance(t, str) and t.strip()]
+        elif isinstance(raw_doc_tags, str):
+            doc_tags = [part.strip() for part in raw_doc_tags.split(",") if part.strip()]
+        else:
+            doc_tags = []
 
         # Pass 1: Extract sentences & consolidate canonical entity types across the whole document.
         sentence_records: list[
@@ -1395,7 +1402,12 @@ class DeterministicNLPMapper:
 
             claim_id = deterministic_id("clm", doc.source_id, sentence)
             tags = list(
-                dict.fromkeys(entities_by_id[eid].entity_type.lower() for eid in sent_entity_ids)
+                dict.fromkeys(
+                    [
+                        *(entities_by_id[eid].entity_type.lower() for eid in sent_entity_ids),
+                        *doc_tags,
+                    ]
+                )
             )
             if subj_id and pred and (obj_id or obj_lit):
                 claim_conf = min(0.95, base_conf + 0.10)
