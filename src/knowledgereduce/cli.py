@@ -42,7 +42,13 @@ from knowledgereduce.models import (
     ReliabilityRating,
     SourceDocument,
 )
-from knowledgereduce.pipeline import LocalFileSourceConfig, PipelineConfig, PipelineRunner
+from knowledgereduce.pipeline import (
+    LocalFileSourceConfig,
+    PipelineConfig,
+    PipelineRunner,
+    filter_unchanged_documents,
+    load_layer_source_hashes,
+)
 from knowledgereduce.query import HybridGraphRAGRetriever, QueryBuilder
 from knowledgereduce.reduce import IntegrityValidator, adjudicate_conflict
 from knowledgereduce.stack import StackManager
@@ -109,26 +115,63 @@ def ingest_command(
     ),
     max_depth: int = typer.Option(1, "--max-depth", help="Maximum web crawl depth."),
     max_pages: int = typer.Option(10, "--max-pages", help="Maximum pages per domain."),
+    incremental_from: str | None = typer.Option(
+        None,
+        "--incremental-from",
+        help="Optional prior layer ID for SHA-256 skip-unchanged delta ingestion.",
+    ),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s", help="DuckDB/Parquet store directory."
+    ),
 ) -> None:
     """Ingest local files and/or web pages into a JSONL checkpoint."""
     try:
         if not files and not urls:
             raise IngestionError("Provide at least one --file or --url input to ingest.")
+        known_by_uri: dict[str, str] = {}
+        known_by_source_id: dict[str, str] = {}
+        if incremental_from is not None:
+            known_by_uri, known_by_source_id = load_layer_source_hashes(
+                DuckDBParquetStore(store_dir), incremental_from
+            )
+
+        skipped_unchanged = 0
         docs: list[SourceDocument] = []
         if urls:
-            docs.extend(
-                WebConnector(
-                    CrawlConfig(
-                        seed_urls=urls,
-                        max_depth=max_depth,
-                        max_pages_per_domain=max_pages,
-                    )
-                ).ingest()
+            connector = WebConnector(
+                CrawlConfig(
+                    seed_urls=urls,
+                    max_depth=max_depth,
+                    max_pages_per_domain=max_pages,
+                    known_hashes=known_by_uri,
+                )
             )
+            docs.extend(connector.ingest())
+            skipped_unchanged += connector.skipped_unchanged
+
+        local_docs: list[SourceDocument] = []
         for path in files:
-            docs.extend(ingest_local_file(path))
+            local_docs.extend(ingest_local_file(path))
+        if known_by_uri or known_by_source_id:
+            kept_local, local_skipped = filter_unchanged_documents(
+                local_docs, known_by_uri, known_by_source_id
+            )
+            docs.extend(kept_local)
+            skipped_unchanged += local_skipped
+        else:
+            docs.extend(local_docs)
+
         out = write_jsonl_checkpoint(docs, output)
-        typer.echo(json.dumps({"document_count": len(docs), "checkpoint": str(out)}, indent=2))
+        typer.echo(
+            json.dumps(
+                {
+                    "document_count": len(docs),
+                    "skipped_unchanged": skipped_unchanged,
+                    "checkpoint": str(out),
+                },
+                indent=2,
+            )
+        )
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -191,6 +234,14 @@ def reduce_command(
         ConflictStrategy.PRESERVE_DISPUTE, "--conflict-strategy"
     ),
     tier: LayerTier = typer.Option(LayerTier.REDUCED, "--tier"),  # noqa: B008
+    parent_layers: list[str] = typer.Option(  # noqa: B008
+        [], "--parent-layer", help="Optional parent layer IDs to record in layer lineage."
+    ),
+    build_index: bool = typer.Option(
+        True,
+        "--build-index/--no-build-index",
+        help="Pre-build persisted claim_embeddings.parquet for warm GraphRAG.",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     """Resolve and reduce mapped batches into an immutable DuckDB/Parquet layer."""
@@ -202,10 +253,13 @@ def reduce_command(
             tier=tier,
             store_dir=str(store_dir),
             conflict_strategy=conflict_strategy,
+            build_embeddings_index=build_index,
             overwrite=overwrite,
         )
         layer_data = PipelineRunner(store=DuckDBParquetStore(store_dir)).reduce_and_store(
-            batches, cfg
+            batches,
+            cfg,
+            parent_layer_ids=parent_layers or None,
         )
         typer.echo(layer_data.layer.model_dump_json(indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
@@ -229,6 +283,11 @@ def stack_command(
         "--reconcile",
         help="Disambiguate entities and detect conflicts across distinct IDs.",
     ),
+    build_index: bool = typer.Option(
+        True,
+        "--build-index/--no-build-index",
+        help="Pre-build persisted claim_embeddings.parquet for warm GraphRAG.",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     """Stack or combine immutable knowledge layers (overlay, union, intersection, difference)."""
@@ -242,7 +301,26 @@ def stack_command(
             reconcile=reconcile,
             overwrite=overwrite,
         )
+        if build_index and stacked.claims:
+            HybridGraphRAGRetriever(store).build_index(target_layer_id)
         typer.echo(stacked.layer.model_dump_json(indent=2))
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("index")
+def index_command(
+    layer_id: str = typer.Argument(..., help="Layer ID to index."),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Build or refresh persisted claim embeddings for a stored layer."""
+    try:
+        store = DuckDBParquetStore(store_dir)
+        indexed = HybridGraphRAGRetriever(store).build_index(layer_id)
+        typer.echo(json.dumps({"layer_id": layer_id, "embeddings_indexed": indexed}, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc

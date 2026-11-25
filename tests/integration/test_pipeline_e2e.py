@@ -8,8 +8,10 @@ import httpx
 import respx
 
 from knowledgereduce.ingest import CrawlConfig
+from knowledgereduce.models import MergeMode
 from knowledgereduce.pipeline import LocalFileSourceConfig, PipelineConfig, PipelineRunner
 from knowledgereduce.reduce import IntegrityValidator
+from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
@@ -131,3 +133,68 @@ max_workers: 2
     resumed = parallel_runner.run_from_mapped_checkpoint(ckpt_dir / "02_mapped.jsonl", resumed_cfg)
     assert len(resumed.claims) == len(loaded.claims)
     assert len(resumed.conflicts) == len(loaded.conflicts)
+
+
+def test_e2e_local_html_incremental_refresh_and_stacked_conflict_union(tmp_path: Path) -> None:
+    store_dir = tmp_path / "store"
+    base_html = tmp_path / "base.html"
+    base_html.write_text(
+        "<html><head><title>Base Civic Docs</title></head><body><main>"
+        "<p>Civic Honors was published in 2006 for student leaders.</p>"
+        "</main></body></html>",
+        encoding="utf-8",
+    )
+    patch_md = tmp_path / "patch.md"
+    patch_md.write_text(
+        "---\ntitle: Unverified Note\n---\n\nCivic Honors was published in 2021 by an unverified blogger.\n",
+        encoding="utf-8",
+    )
+
+    runner = PipelineRunner()
+    base_layer = runner.run(
+        PipelineConfig(
+            layer_id="html-base",
+            layer_name="HTML Base",
+            store_dir=str(store_dir),
+            local_files=[
+                LocalFileSourceConfig(path=str(base_html), source_id="html_base", trust_weight=0.95)
+            ],
+            min_sentence_length=20,
+            min_claim_length=20,
+        )
+    )
+    assert len(base_layer.sources) == 1
+    assert (store_dir / "layers" / "html-base" / "claim_embeddings.parquet").is_file()
+
+    # Incremental refresh skips unchanged base_html while ingesting new conflicting patch_md.
+    delta_layer = runner.run(
+        PipelineConfig(
+            layer_id="delta-patch",
+            layer_name="Delta Patch",
+            store_dir=str(store_dir),
+            incremental_from_layer="html-base",
+            local_files=[
+                LocalFileSourceConfig(
+                    path=str(base_html), source_id="html_base", trust_weight=0.95
+                ),
+                LocalFileSourceConfig(path=str(patch_md), source_id="md_patch", trust_weight=0.35),
+            ],
+            min_sentence_length=20,
+            min_claim_length=20,
+        )
+    )
+    assert [s.source_id for s in delta_layer.sources] == ["md_patch"]
+    assert delta_layer.layer.parent_layer_ids == ["html-base"]
+
+    # Reconciled union across base + delta detects conflict cleanly and preserves higher-trust 2006.
+    store = DuckDBParquetStore(store_dir)
+    merged = StackManager(store).merge_layers(
+        ["html-base", "delta-patch"],
+        target_layer_id="html-stacked",
+        mode=MergeMode.UNION,
+        reconcile=True,
+    )
+    assert IntegrityValidator().validate(merged, strict=True).valid is True
+    assert len(merged.conflicts) == 1
+    assert merged.conflicts[0].winning_value == "2006"
+    assert any(r.relation_type == "CONTRADICTS" for r in merged.relations)

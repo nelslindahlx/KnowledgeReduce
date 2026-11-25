@@ -207,6 +207,54 @@ class TextConnector:
         ]
 
 
+class HTMLConnector:
+    """Ingest a local HTML file into a normalized ``SourceDocument`` using offline extraction."""
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        source_id: str | None = None,
+        title: str | None = None,
+        author: str | None = None,
+        trust_weight: float = 0.75,
+        base_dir: Path | str | None = None,
+    ) -> None:
+        self.path = path
+        self.source_id = source_id
+        self.title = title
+        self.author = author
+        self.trust_weight = trust_weight
+        self.base_dir = base_dir
+
+    def ingest(self) -> list[SourceDocument]:
+        from knowledgereduce.ingest.web import _parse_optional_iso, extract_main_text
+
+        resolved = _resolve_input_path(self.path, self.base_dir)
+        raw_html = resolved.read_text(encoding="utf-8")
+        text, meta = extract_main_text(raw_html, resolved.as_uri())
+        doc_title = self.title or meta.get("title") or resolved.stem
+        doc_author = self.author or meta.get("author")
+        published_at = _parse_optional_iso(meta.get("published_at"))
+        return [
+            SourceDocument(
+                source_id=self.source_id or _file_source_id("html", resolved),
+                uri=resolved.as_uri(),
+                source_type=SourceType.HTML,
+                title=doc_title,
+                author=doc_author,
+                published_at=published_at,
+                fetched_at=utc_now(),
+                content=text,
+                trust_weight=self.trust_weight,
+                metadata={
+                    "description": meta.get("description") or "",
+                    "raw_bytes": len(raw_html.encode("utf-8")),
+                },
+            )
+        ]
+
+
 def ingest_local_file(
     path: Path | str,
     *,
@@ -223,6 +271,8 @@ def ingest_local_file(
         return JSONConnector(resolved, source_id=source_id, trust_weight=trust_weight).ingest()
     if suffix in {".md", ".markdown"}:
         return MarkdownConnector(resolved, source_id=source_id, trust_weight=trust_weight).ingest()
+    if suffix in {".html", ".htm"}:
+        return HTMLConnector(resolved, source_id=source_id, trust_weight=trust_weight).ingest()
     if suffix == ".txt":
         return TextConnector(resolved, source_id=source_id, trust_weight=trust_weight).ingest()
     raise IngestionError(f"Unsupported local file extension {suffix!r} for {resolved}.")

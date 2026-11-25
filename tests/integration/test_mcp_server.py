@@ -284,6 +284,64 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
             {"layer_id": "ch-curated", "min_reliability": 99},
         )
 
+    # 11. Incremental ingest parity, parent_layer_ids, and pre-warmed claim_embeddings.parquet
+    assert (
+        ws / ".knowledgereduce_store" / "layers" / "ch-base" / "claim_embeddings.parquet"
+    ).is_file()
+    assert (
+        ws / ".knowledgereduce_store" / "layers" / "ch-stacked" / "claim_embeddings.parquet"
+    ).is_file()
+
+    (ws / "extra.html").write_text(
+        "<html><head><title>Extra</title></head><body><main>"
+        "<p>Johnson County Community College expanded civic service opportunities in 2005.</p>"
+        "</main></body></html>",
+        encoding="utf-8",
+    )
+    inc_res = await server.call_tool(
+        "ingest_source",
+        {
+            "local_files": [
+                {"path": "civichonors_facts.csv", "source_id": "csv_curated"},
+                {"path": "extra.html", "source_id": "html_extra"},
+            ],
+            "crawl_config": {
+                "seed_urls": ["https://civichonors.com/p/the-book"],
+                "max_depth": 0,
+                "rate_limit_seconds": 0.0,
+            },
+            "checkpoint_name": "01_inc.jsonl",
+            "incremental_from_layer": "ch-base",
+        },
+    )
+    assert not inc_res.is_error
+    inc_data = json.loads(inc_res.content[0].text)  # type: ignore[union-attr]
+    assert inc_data["skipped_unchanged"] == 2
+    assert inc_data["document_count"] == 1
+    assert inc_data["source_ids"] == ["html_extra"]
+
+    map_inc = await server.call_tool(
+        "run_local_map",
+        {"ingested_checkpoint": "01_inc.jsonl", "mapped_checkpoint": "02_inc.jsonl"},
+    )
+    assert not map_inc.is_error
+    red_inc = await server.call_tool(
+        "resolve_and_reduce",
+        {
+            "layer_id": "ch-inc-child",
+            "layer_name": "Incremental Child",
+            "mapped_checkpoint": "02_inc.jsonl",
+            "parent_layer_ids": ["ch-base"],
+            "build_embeddings_index": True,
+        },
+    )
+    assert not red_inc.is_error
+    red_inc_data = json.loads(red_inc.content[0].text)  # type: ignore[union-attr]
+    assert red_inc_data["parent_layer_ids"] == ["ch-base"]
+    assert (
+        ws / ".knowledgereduce_store" / "layers" / "ch-inc-child" / "claim_embeddings.parquet"
+    ).is_file()
+
 
 async def test_mcp_stdio_subprocess_initialize_and_list_tools(tmp_path: Path) -> None:
     params = StdioServerParameters(

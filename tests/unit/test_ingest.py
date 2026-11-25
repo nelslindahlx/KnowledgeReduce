@@ -13,6 +13,7 @@ from knowledgereduce.ingest import (
     AsyncWebCrawler,
     CrawlConfig,
     CSVConnector,
+    HTMLConnector,
     JSONConnector,
     MarkdownConnector,
     TextConnector,
@@ -21,7 +22,13 @@ from knowledgereduce.ingest import (
     read_jsonl_checkpoint,
     write_jsonl_checkpoint,
 )
-from knowledgereduce.models import IngestionError, SourceDocument, SourceType, SSRFError
+from knowledgereduce.models import (
+    IngestionError,
+    PathSecurityError,
+    SourceDocument,
+    SourceType,
+    SSRFError,
+)
 
 
 def _public_dns(_host: str, _port: int) -> list[str]:
@@ -275,3 +282,48 @@ async def test_web_crawler_handles_gzip_compressed_responses_and_http_errors() -
     )
     with pytest.raises(IngestionError, match="HTTP error fetching"):
         await failing_timeout.crawl()
+
+
+def test_html_connector_extracts_metadata_and_enforces_base_dir(tmp_path: Path) -> None:
+    html_file = tmp_path / "civic_article.html"
+    html_file.write_text(
+        """
+        <html>
+          <head>
+            <title>Civic Honors Article</title>
+            <meta name="author" content="Dr. Nels Lindahl" />
+            <meta name="description" content="Civic Honors history." />
+            <meta property="article:published_time" content="2020-06-14T12:00:00Z" />
+          </head>
+          <body>
+            <script>var secret = 1;</script>
+            <nav><a href="/nav">Navigation link</a></nav>
+            <main><p>Civic Honors began in 2002 at the University of Kansas.</p></main>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+    htm_file = tmp_path / "brief.htm"
+    htm_file.write_text(
+        "<html><body><p>Short HTM summary line.</p></body></html>", encoding="utf-8"
+    )
+
+    docs = HTMLConnector(html_file, base_dir=tmp_path).ingest()
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.source_type == SourceType.HTML
+    assert doc.title == "Civic Honors Article"
+    assert doc.author == "Dr. Nels Lindahl"
+    assert doc.published_at is not None and doc.published_at.year == 2020
+    assert "University of Kansas" in doc.content
+    assert "var secret" not in doc.content
+
+    dispatched = ingest_local_file(htm_file, base_dir=tmp_path)
+    assert dispatched[0].source_type == SourceType.HTML
+    assert dispatched[0].title == "brief"
+    assert "Short HTM summary line." in dispatched[0].content
+
+    outside = tmp_path.parent / "outside.html"
+    with pytest.raises(PathSecurityError):
+        HTMLConnector(outside, base_dir=tmp_path).ingest()

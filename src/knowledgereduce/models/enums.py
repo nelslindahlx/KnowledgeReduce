@@ -23,6 +23,7 @@ class SourceType(StrEnum):
     JSON = "json"
     JSONL = "jsonl"
     MARKDOWN = "markdown"
+    HTML = "html"
     TEXT = "text"
     AGENT = "agent"
     UNKNOWN = "unknown"
