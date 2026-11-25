@@ -299,3 +299,97 @@ def test_cli_conflicts_resolve_conflict_and_stack_reconcile(tmp_path: Path) -> N
     )
     assert res_all_after.exit_code == 0
     assert json.loads(res_all_after.stdout)["count"] == 1
+
+
+def test_cli_incremental_ingest_parent_lineage_and_index_command(tmp_path: Path) -> None:
+    runner = CliRunner()
+    store_dir = tmp_path / "store"
+    html_src = tmp_path / "ch_note.html"
+    html_src.write_text(
+        "<html><head><title>CH Note</title></head><body><main>"
+        "<p>Civic Honors was published in 2006 to inspire student leaders.</p>"
+        "</main></body></html>",
+        encoding="utf-8",
+    )
+    txt_delta = tmp_path / "delta.txt"
+    txt_delta.write_text(
+        "Dr. Raymond Davis advised Civic Honors research in Kansas.",
+        encoding="utf-8",
+    )
+
+    ing_base = tmp_path / "base_ing.jsonl"
+    map_base = tmp_path / "base_map.jsonl"
+    res_ing = runner.invoke(app, ["ingest", "-f", str(html_src), "-o", str(ing_base)])
+    assert res_ing.exit_code == 0, res_ing.stdout
+    assert json.loads(res_ing.stdout)["skipped_unchanged"] == 0
+
+    assert runner.invoke(app, ["map", "-i", str(ing_base), "-o", str(map_base)]).exit_code == 0
+    res_red_no_idx = runner.invoke(
+        app,
+        [
+            "reduce",
+            "--layer-id",
+            "cli-base",
+            "--name",
+            "CLI Base",
+            "-i",
+            str(map_base),
+            "-s",
+            str(store_dir),
+            "--no-build-index",
+        ],
+    )
+    assert res_red_no_idx.exit_code == 0, res_red_no_idx.stdout
+    assert not (store_dir / "layers" / "cli-base" / "claim_embeddings.parquet").exists()
+
+    # Build persisted embeddings explicitly with `kr index`
+    res_idx = runner.invoke(app, ["index", "cli-base", "-s", str(store_dir)])
+    assert res_idx.exit_code == 0, res_idx.stdout
+    assert json.loads(res_idx.stdout)["embeddings_indexed"] >= 1
+    assert (store_dir / "layers" / "cli-base" / "claim_embeddings.parquet").is_file()
+
+    # Incremental ingest skips unchanged html_src while capturing new txt_delta
+    ing_delta = tmp_path / "delta_ing.jsonl"
+    map_delta = tmp_path / "delta_map.jsonl"
+    res_inc = runner.invoke(
+        app,
+        [
+            "ingest",
+            "-f",
+            str(html_src),
+            "-f",
+            str(txt_delta),
+            "--incremental-from",
+            "cli-base",
+            "-s",
+            str(store_dir),
+            "-o",
+            str(ing_delta),
+        ],
+    )
+    assert res_inc.exit_code == 0, res_inc.stdout
+    inc_payload = json.loads(res_inc.stdout)
+    assert inc_payload["document_count"] == 1
+    assert inc_payload["skipped_unchanged"] == 1
+
+    assert runner.invoke(app, ["map", "-i", str(ing_delta), "-o", str(map_delta)]).exit_code == 0
+    res_child = runner.invoke(
+        app,
+        [
+            "reduce",
+            "--layer-id",
+            "cli-delta",
+            "--name",
+            "CLI Delta",
+            "--parent-layer",
+            "cli-base",
+            "-i",
+            str(map_delta),
+            "-s",
+            str(store_dir),
+        ],
+    )
+    assert res_child.exit_code == 0, res_child.stdout
+    child_layer = json.loads(res_child.stdout)
+    assert child_layer["parent_layer_ids"] == ["cli-base"]
+    assert (store_dir / "layers" / "cli-delta" / "claim_embeddings.parquet").is_file()

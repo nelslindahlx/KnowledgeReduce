@@ -41,7 +41,12 @@ from knowledgereduce.models import (
     SourceDocument,
     StorageError,
 )
-from knowledgereduce.pipeline import PipelineConfig, PipelineRunner
+from knowledgereduce.pipeline import (
+    PipelineConfig,
+    PipelineRunner,
+    filter_unchanged_documents,
+    load_layer_source_hashes,
+)
 from knowledgereduce.query import (
     HybridGraphRAGRetriever,
     QueryBuilder,
@@ -247,20 +252,34 @@ def create_mcp_server(
         local_files: list[dict[str, Any]] | None = None,
         crawl_config: dict[str, Any] | None = None,
         checkpoint_name: str = "01_ingested.jsonl",
+        incremental_from_layer: str | None = None,
     ) -> dict[str, Any]:
         """Ingest local files and/or web URLs into a workspace JSONL checkpoint."""
+        known_by_uri: dict[str, str] = {}
+        known_by_source_id: dict[str, str] = {}
+        if incremental_from_layer is not None:
+            known_by_uri, known_by_source_id = load_layer_source_hashes(
+                store, incremental_from_layer
+            )
+
+        skipped_unchanged = 0
         docs: list[SourceDocument] = []
         if crawl_config is not None:
             cfg = CrawlConfig.model_validate(crawl_config)
+            if known_by_uri:
+                merged_hashes = {**known_by_uri, **cfg.known_hashes}
+                cfg = cfg.model_copy(update={"known_hashes": merged_hashes})
             crawler = AsyncWebCrawler(cfg, transport=web_transport, resolver=dns_resolver)
             docs.extend(await crawler.crawl())
+            skipped_unchanged += crawler.skipped_unchanged
 
+        local_docs: list[SourceDocument] = []
         for item in local_files or []:
             raw_path = str(item.get("path", ""))
             safe_file = ensure_within_base(raw_path, base)
             source_id = str(item["source_id"]) if item.get("source_id") else None
             trust_weight = float(item.get("trust_weight", 0.75))
-            docs.extend(
+            local_docs.extend(
                 ingest_local_file(
                     safe_file,
                     source_id=source_id,
@@ -268,11 +287,20 @@ def create_mcp_server(
                     base_dir=base,
                 )
             )
+        if known_by_uri or known_by_source_id:
+            kept_local, local_skipped = filter_unchanged_documents(
+                local_docs, known_by_uri, known_by_source_id
+            )
+            docs.extend(kept_local)
+            skipped_unchanged += local_skipped
+        else:
+            docs.extend(local_docs)
 
         ckpt_path = ensure_within_base(checkpoint_name, resolved_ckpt_dir)
         write_jsonl_checkpoint(docs, ckpt_path)
         return {
             "document_count": len(docs),
+            "skipped_unchanged": skipped_unchanged,
             "source_ids": [d.source_id for d in docs],
             "checkpoint_path": str(ckpt_path.relative_to(base)),
         }
@@ -347,6 +375,8 @@ def create_mcp_server(
         lexical_threshold: float = 0.88,
         semantic_threshold: float = 0.84,
         min_claim_length: int = 20,
+        parent_layer_ids: list[str] | None = None,
+        build_embeddings_index: bool = True,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Resolve entities/claims, adjudicate conflicts, and store an immutable Parquet layer."""
@@ -363,9 +393,12 @@ def create_mcp_server(
             layer_id=layer_id,
             layer_name=layer_name,
             tier=LayerTier(tier),
+            parent_layer_ids=parent_layer_ids,
             strict_validation=True,
         )
         store.save_layer(layer_data, overwrite=overwrite)
+        if build_embeddings_index and layer_data.claims:
+            retriever.build_index(layer_id)
         return layer_data.layer.model_dump(mode="json")
 
     @server.tool()
@@ -378,6 +411,7 @@ def create_mcp_server(
         conflict_strategy: str = "preserve_dispute",
         tier: str = "stacked",
         reconcile: bool = False,
+        build_embeddings_index: bool = True,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Compose immutable layers via overlay, union, intersection, or difference."""
@@ -391,6 +425,8 @@ def create_mcp_server(
             reconcile=reconcile,
             overwrite=overwrite,
         )
+        if build_embeddings_index and stacked.claims:
+            retriever.build_index(target_layer_id)
         return stacked.layer.model_dump(mode="json")
 
     @server.tool()

@@ -152,6 +152,7 @@ class AsyncWebCrawler:
         self._resolver = resolver
         self._robots_cache: dict[str, tuple[RobotFileParser | None, float]] = {}
         self._domain_last_request: dict[str, float] = {}
+        self.skipped_unchanged: int = 0
 
     def _allowed_domain_set(self) -> set[str]:
         if self.config.allowed_domains:
@@ -292,6 +293,7 @@ class AsyncWebCrawler:
         visited: set[str] = set()
         domain_counts: dict[str, int] = {}
         documents: list[SourceDocument] = []
+        self.skipped_unchanged = 0
 
         for seed in self.config.seed_urls:
             safe_seed = validate_url_safe(
@@ -361,6 +363,7 @@ class AsyncWebCrawler:
 
                 content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 if self.config.known_hashes.get(final_url) == content_sha:
+                    self.skipped_unchanged += 1
                     logger.info("crawl_skipped_unchanged", url=final_url)
                     continue
 
@@ -415,6 +418,7 @@ class WebConnector:
         self.config = config
         self._transport = transport
         self._resolver = resolver
+        self.skipped_unchanged: int = 0
 
     def ingest(self) -> list[SourceDocument]:
         """Run the async web crawl synchronously."""
@@ -423,4 +427,6 @@ class WebConnector:
             transport=self._transport,
             resolver=self._resolver,
         )
-        return asyncio.run(crawler.crawl())
+        docs = asyncio.run(crawler.crawl())
+        self.skipped_unchanged = crawler.skipped_unchanged
+        return docs

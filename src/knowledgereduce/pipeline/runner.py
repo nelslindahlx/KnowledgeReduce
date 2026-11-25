@@ -84,6 +84,42 @@ def build_retrieval_embedding_provider(config: PipelineConfig) -> EmbeddingProvi
     return HashingEmbeddingProvider()
 
 
+def load_layer_source_hashes(
+    store: GraphStore,
+    layer_id: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Load prior source ``(uri -> sha256, source_id -> sha256)`` digests for *layer_id*."""
+    if not store.layer_exists(layer_id):
+        raise StorageError(f"Incremental base layer {layer_id!r} does not exist.")
+    prior = store.load_layer(layer_id)
+    known_by_uri = {
+        src.uri: src.content_sha256 for src in prior.sources if src.uri and src.content_sha256
+    }
+    known_by_source_id = {
+        src.source_id: src.content_sha256
+        for src in prior.sources
+        if src.source_id and src.content_sha256
+    }
+    return known_by_uri, known_by_source_id
+
+
+def filter_unchanged_documents(
+    docs: Sequence[SourceDocument],
+    known_by_uri: dict[str, str],
+    known_by_source_id: dict[str, str],
+) -> tuple[list[SourceDocument], int]:
+    """Return ``(changed_docs, skipped_count)`` using prior source SHA-256 digests."""
+    kept: list[SourceDocument] = []
+    skipped = 0
+    for doc in docs:
+        expected_sha = known_by_uri.get(doc.uri) or known_by_source_id.get(doc.source_id)
+        if expected_sha and expected_sha == doc.content_sha256:
+            skipped += 1
+            continue
+        kept.append(doc)
+    return kept, skipped
+
+
 class PipelineRunner:
     """Orchestrates Ingest -> Map -> Resolve -> Reduce -> Store with stage checkpoints."""
 
@@ -110,21 +146,7 @@ class PipelineRunner:
         """Load prior source SHA-256 digests from ``incremental_from_layer``."""
         if config.incremental_from_layer is None:
             return {}, {}
-        store = self._get_store(config)
-        if not store.layer_exists(config.incremental_from_layer):
-            raise StorageError(
-                f"Incremental base layer {config.incremental_from_layer!r} does not exist."
-            )
-        prior = store.load_layer(config.incremental_from_layer)
-        known_by_uri = {
-            src.uri: src.content_sha256 for src in prior.sources if src.uri and src.content_sha256
-        }
-        known_by_source_id = {
-            src.source_id: src.content_sha256
-            for src in prior.sources
-            if src.source_id and src.content_sha256
-        }
-        return known_by_uri, known_by_source_id
+        return load_layer_source_hashes(self._get_store(config), config.incremental_from_layer)
 
     def ingest(self, config: PipelineConfig) -> list[SourceDocument]:
         """Run stage 1 (Ingestion) and write ``01_ingested.jsonl`` if checkpoints enabled."""
@@ -142,19 +164,25 @@ class PipelineRunner:
                 resolver=self._dns_resolver,
             )
             docs.extend(crawler.ingest())
+            skipped_unchanged += crawler.skipped_unchanged
 
+        local_docs: list[SourceDocument] = []
         for file_cfg in config.local_files:
-            file_docs = ingest_local_file(
-                file_cfg.path,
-                source_id=file_cfg.source_id,
-                trust_weight=file_cfg.trust_weight,
+            local_docs.extend(
+                ingest_local_file(
+                    file_cfg.path,
+                    source_id=file_cfg.source_id,
+                    trust_weight=file_cfg.trust_weight,
+                )
             )
-            for doc in file_docs:
-                expected_sha = known_by_uri.get(doc.uri) or known_by_source_id.get(doc.source_id)
-                if expected_sha and expected_sha == doc.content_sha256:
-                    skipped_unchanged += 1
-                    continue
-                docs.append(doc)
+        if known_by_uri or known_by_source_id:
+            kept_local, local_skipped = filter_unchanged_documents(
+                local_docs, known_by_uri, known_by_source_id
+            )
+            docs.extend(kept_local)
+            skipped_unchanged += local_skipped
+        else:
+            docs.extend(local_docs)
 
         if config.checkpoint_dir:
             ckpt = Path(config.checkpoint_dir) / "01_ingested.jsonl"

@@ -7,6 +7,7 @@ from knowledgereduce.ingest.base import (
 )
 from knowledgereduce.ingest.files import (
     CSVConnector,
+    HTMLConnector,
     JSONConnector,
     MarkdownConnector,
     TextConnector,
@@ -24,6 +25,7 @@ __all__ = [
     "BaseConnector",
     "CSVConnector",
     "CrawlConfig",
+    "HTMLConnector",
     "JSONConnector",
     "MarkdownConnector",
     "TextConnector",
