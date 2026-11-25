@@ -19,7 +19,11 @@ from knowledgereduce.models import (
 from knowledgereduce.reduce import KnowledgeReducer
 from knowledgereduce.reduce.reducer import _claim_importance, _merge_claim_cluster
 from knowledgereduce.resolve import cluster_claims
-from knowledgereduce.resolve.blocking import _claims_compatible_for_merge
+from knowledgereduce.resolve.blocking import (
+    _claims_compatible_for_merge,
+    _extract_merge_features,
+    _features_compatible,
+)
 
 
 def _claim(
@@ -299,3 +303,80 @@ def test_reducer_preserves_apa_ref_while_merging_non_functional_paraphrases() ->
     assert len(statements) == 3
     assert any("Carlsen, C. J." in s for s in statements)
     assert any("I was honored to submit" in s for s in statements)
+
+
+def test_precomputed_merge_features_parity_and_coarse_buckets() -> None:
+    vocab = frozenset({"PUBLISHED_IN", "FOUNDED_IN"})
+    samples = [
+        _claim(
+            "a1",
+            "Civic Honors was published in 2006.",
+            subject_id="ent_ch",
+            predicate="PUBLISHED_IN",
+            object_literal="2006",
+        ),
+        _claim(
+            "a2",
+            "Civic Honors was published in 2020.",
+            subject_id="ent_ch",
+            predicate="PUBLISHED_IN",
+            object_literal="2020",
+        ),
+        _claim(
+            "b1",
+            "Civic Honors provides students with leadership guidance.",
+            subject_id="ent_ch",
+            predicate="PROVIDES",
+            object_literal="students with leadership guidance",
+        ),
+        _claim(
+            "b2",
+            "Civic Honors provides college students with leadership guidance.",
+            subject_id="ent_ch",
+            predicate="PROVIDES",
+            object_literal="college students with leadership guidance",
+        ),
+        _claim(
+            "c1",
+            "Civic Honors emphasizes leadership development.",
+            subject_id="ent_ch",
+            predicate="EMPHASIZES",
+            object_id="ent_lead",
+        ),
+        _claim(
+            "c2",
+            "Civic Honors emphasizes community service.",
+            subject_id="ent_ch",
+            predicate="EMPHASIZES",
+            object_id="ent_serv",
+        ),
+        _claim("h1", "The Story Behind Graduation With Civic Honors"),
+        _claim(
+            "h2",
+            "The story behind graduation with civic honors began in 2002 at the University of Kansas.",
+        ),
+        _claim(
+            "apa",
+            "Carlsen, C. J., Lindahl, N., & Lindahl, S. (2004). Service learning. Journal for Civic Commitment, 4, 1-9.",
+        ),
+        _claim("n1", "Participation reached 150 students across 3 campuses in Kansas."),
+        _claim("n2", "Participation reached 200 students across 4 campuses in Kansas."),
+    ]
+    feats = [_extract_merge_features(c, vocab) for c in samples]
+    for i, ci in enumerate(samples):
+        for j, cj in enumerate(samples):
+            assert _features_compatible(feats[i], feats[j]) == _claims_compatible_for_merge(
+                ci, cj, functional_vocab=vocab
+            )
+
+    # Exercise coarse MiniBatchKMeans sub-partitioning with precomputed bucket_features.
+    clusters, _ = cluster_claims(
+        samples,
+        dense_cluster_limit=3,
+        functional_predicates=vocab,
+    )
+    cluster_sets = [{c.claim_id for c in grp} for grp in clusters]
+    # Incompatible functional years and distinct object_ids stay in separate clusters.
+    assert not any({"a1", "a2"}.issubset(s) for s in cluster_sets)
+    assert not any({"c1", "c2"}.issubset(s) for s in cluster_sets)
+    assert not any({"n1", "n2"}.issubset(s) for s in cluster_sets)

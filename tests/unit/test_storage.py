@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from knowledgereduce.models import (
@@ -263,3 +265,70 @@ def test_duckdb_embedding_parquet_lifecycle(tmp_path: Path) -> None:
     store.save_layer(sample, overwrite=True)
     assert not emb_pq.is_file()
     assert store.load_claim_embeddings("emb-life", model_id="m1") is None
+
+
+def test_duckdb_fixed_size_embeddings_cache_and_legacy_fallback(tmp_path: Path) -> None:
+    store = DuckDBParquetStore(tmp_path)
+    sample = _make_sample_layer("emb-cache")
+    store.save_layer(sample)
+
+    vecs = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    store.save_claim_embeddings("emb-cache", ["clm-1", "clm-2"], vecs, model_id="m1")
+
+    emb_pq = tmp_path / "layers" / "emb-cache" / "claim_embeddings.parquet"
+    emb_schema = pq.read_schema(emb_pq)
+    assert pa.types.is_fixed_size_list(emb_schema.field("embedding").type)
+
+    first = store.load_claim_embeddings("emb-cache", model_id="m1")
+    second = store.load_claim_embeddings("emb-cache", model_id="m1")
+    assert first is not None and second is not None
+    assert first[1] is second[1]
+    assert first[1].flags.writeable is False
+    # Returned claim IDs list is a fresh copy so caller mutation cannot corrupt cache.
+    first[0].append("mutated")
+    third = store.load_claim_embeddings("emb-cache", model_id="m1")
+    assert third is not None and third[0] == ["clm-1", "clm-2"]
+
+    # Updating embeddings invalidates cache cleanly.
+    vecs_updated = np.array([[0.0, 0.0, 1.0], [0.5, 0.5, 0.0]], dtype=np.float32)
+    store.save_claim_embeddings("emb-cache", ["clm-1", "clm-2"], vecs_updated, model_id="m1")
+    reloaded = store.load_claim_embeddings("emb-cache", model_id="m1")
+    assert reloaded is not None and np.allclose(reloaded[1], vecs_updated)
+
+    # Backward-compatible read of legacy variable-size list<float32> Parquet files.
+    legacy_schema = pa.schema(
+        [
+            ("claim_id", pa.string()),
+            ("model_id", pa.string()),
+            ("embedding", pa.list_(pa.float32())),
+        ]
+    )
+    legacy_table = pa.table(
+        {
+            "claim_id": pa.array(["clm-1", "clm-2"], type=pa.string()),
+            "model_id": pa.array(["m-legacy", "m-legacy"], type=pa.string()),
+            "embedding": pa.array(
+                [[0.25, 0.75, 0.0], [0.0, 0.25, 0.75]], type=pa.list_(pa.float32())
+            ),
+        },
+        schema=legacy_schema,
+    )
+    pq.write_table(legacy_table, emb_pq)
+    legacy_loaded = store.load_claim_embeddings("emb-cache", model_id="m-legacy")
+    assert legacy_loaded is not None
+    assert np.allclose(
+        legacy_loaded[1], np.array([[0.25, 0.75, 0.0], [0.0, 0.25, 0.75]], dtype=np.float32)
+    )
+
+    # Empty and zero-width edge cases + delete eviction.
+    store.save_claim_embeddings("emb-cache", [], np.empty((0, 0), dtype=np.float32), model_id="m1")
+    assert store.load_claim_embeddings("emb-cache", model_id="m1") is None
+
+    store.save_claim_embeddings(
+        "emb-cache", ["clm-1", "clm-2"], np.empty((2, 0), dtype=np.float32), model_id="m0"
+    )
+    zero_dim = store.load_claim_embeddings("emb-cache", model_id="m0")
+    assert zero_dim is not None and zero_dim[1].shape == (2, 0)
+
+    store.delete_layer("emb-cache")
+    assert ("emb-cache", "m0") not in store._embedding_cache
