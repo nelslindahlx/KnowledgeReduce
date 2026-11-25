@@ -6,6 +6,7 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import networkx as nx
 import pytest
 
 from knowledgereduce.export import (
@@ -16,6 +17,7 @@ from knowledgereduce.export import (
     import_layer_json,
     import_layer_sharded,
 )
+from knowledgereduce.export.json_export import node_link_graph_compat
 from knowledgereduce.models import (
     Claim,
     Entity,
@@ -127,3 +129,35 @@ def test_graphml_and_gexf_export_valid_xml_without_mutating_source(tmp_path: Pat
     assert ET.parse(gexf).getroot().tag.endswith("gexf")  # noqa: S314
     # Source LayerData must remain completely untouched
     assert layer_data.model_dump(mode="json") == snapshot
+
+
+def test_json_export_error_paths_and_compat_loader(tmp_path: Path) -> None:
+    with pytest.raises(StorageError, match="not found"):
+        import_layer_json(tmp_path / "missing.json")
+
+    bad_ver = tmp_path / "bad_ver.json"
+    bad_ver.write_text(json.dumps({"schema_version": "9.9"}), encoding="utf-8")
+    with pytest.raises(StorageError, match="schema_version"):
+        import_layer_json(bad_ver)
+
+    edges_payload = {
+        "directed": True,
+        "multigraph": True,
+        "graph": {},
+        "nodes": [{"id": "a"}, {"id": "b"}],
+        "edges": [{"source": "a", "target": "b", "key": 0}],
+    }
+    restored_edges = node_link_graph_compat(edges_payload)
+    assert isinstance(restored_edges, nx.MultiDiGraph)
+    assert restored_edges.has_edge("a", "b")
+
+    links_digraph_payload = {
+        "directed": True,
+        "multigraph": False,
+        "graph": {},
+        "nodes": [{"id": "a"}, {"id": "b"}],
+        "links": [{"source": "a", "target": "b"}],
+    }
+    promoted = node_link_graph_compat(links_digraph_payload)
+    assert isinstance(promoted, nx.MultiDiGraph)
+    assert promoted.has_edge("a", "b")

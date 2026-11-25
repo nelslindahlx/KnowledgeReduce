@@ -327,3 +327,71 @@ def test_html_connector_extracts_metadata_and_enforces_base_dir(tmp_path: Path) 
     outside = tmp_path.parent / "outside.html"
     with pytest.raises(PathSecurityError):
         HTMLConnector(outside, base_dir=tmp_path).ingest()
+
+
+async def test_ingest_fallback_and_crawler_status_and_content_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from knowledgereduce.ingest import web as web_mod
+
+    monkeypatch.setattr(web_mod, "_extract_with_trafilatura", lambda _h, _u: None)
+    html_blocks = (
+        "<html><body><nav>Skip</nav>"
+        "<ul><li><p>Nested list paragraph.</p></li><li>Plain list item.</li></ul>"
+        "</body></html>"
+    )
+    txt_blocks, _ = extract_main_text(html_blocks, "https://example.org/")
+    assert "Skip" not in txt_blocks
+    assert txt_blocks.count("Nested list paragraph.") == 1
+    assert "Plain list item." in txt_blocks
+
+    txt_raw, _ = extract_main_text(
+        "<html><body><span>  Loose  </span><span>body text</span></body></html>"
+    )
+    assert txt_raw == "Loose body text"
+    assert web_mod._parse_optional_iso("not-a-date") is None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if path == "/":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text=(
+                    "<html><body><p>Root page.</p>"
+                    "<a href='/missing'>404</a>"
+                    "<a href='/doc.pdf'>PDF</a>"
+                    "<a href='/notes.txt'>TXT</a></body></html>"
+                ),
+            )
+        if path == "/missing":
+            return httpx.Response(404, text="not found")
+        if path == "/doc.pdf":
+            return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF")
+        if path == "/notes.txt":
+            return httpx.Response(200, headers={"content-type": "text/plain"}, text="Plain body.")
+        return httpx.Response(404)
+
+    cfg = CrawlConfig(
+        seed_urls=["https://example.org/"],
+        max_depth=1,
+        max_pages_per_domain=10,
+        rate_limit_seconds=0.0,
+    )
+    docs = await AsyncWebCrawler(
+        cfg, transport=httpx.MockTransport(handler), resolver=_public_dns
+    ).crawl()
+    assert len(docs) == 2
+    assert any(d.content == "Plain body." for d in docs)
+
+    offsite_cfg = CrawlConfig(
+        seed_urls=["https://other.org/"],
+        allowed_domains=["example.org"],
+        rate_limit_seconds=0.0,
+    )
+    with pytest.raises(IngestionError, match="outside allowed_domains"):
+        await AsyncWebCrawler(
+            offsite_cfg, transport=httpx.MockTransport(handler), resolver=_public_dns
+        ).crawl()

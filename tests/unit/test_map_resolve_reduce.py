@@ -670,3 +670,32 @@ def test_deterministic_mapper_clause_stops_org_typing_and_temporal_conflicts() -
     assert len(resolved_trust.conflicts) == 1
     assert resolved_trust.conflicts[0].needs_review is False
     assert resolved_trust.conflicts[0].winning_value == "2002"
+
+
+def test_integrity_validator_catches_duplicates_dangling_refs_and_warnings() -> None:
+    from knowledgereduce.models import ConflictRecord, KnowledgeLayer, LayerData
+    from knowledgereduce.reduce import IntegrityValidator
+
+    dup_ent = Entity(entity_id="e1", canonical_name="One", entity_type="CONCEPT")
+    dup_clm = Claim(
+        claim_id="c1",
+        statement="Statement referencing missing subject and object.",
+        subject_id="missing_s",
+        object_id="missing_o",
+    )
+    dup_rel = Relation(
+        relation_id="r1", source_id="missing_src", target_id="missing_dst", relation_type="LINKS"
+    )
+    dup_cf = ConflictRecord(conflict_id="cf1", target_type="claim", target_key="k1")
+    bad = LayerData(
+        layer=KnowledgeLayer(layer_id="bad-val", name="Bad"),
+        entities=[dup_ent, dup_ent],
+        claims=[dup_clm, dup_clm],
+        relations=[dup_rel, dup_rel],
+        conflicts=[dup_cf, dup_cf],
+    )
+    report = IntegrityValidator().validate(bad, strict=False)
+    assert report.valid is False
+    # 4 duplicate-ID errors + 4 claim subject/object errors + 4 relation source/target errors
+    assert len(report.errors) == 12
+    assert len(report.warnings) == 4

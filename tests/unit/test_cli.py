@@ -393,3 +393,161 @@ def test_cli_incremental_ingest_parent_lineage_and_index_command(tmp_path: Path)
     child_layer = json.loads(res_child.stdout)
     assert child_layer["parent_layer_ids"] == ["cli-base"]
     assert (store_dir / "layers" / "cli-delta" / "claim_embeddings.parquet").is_file()
+
+
+def test_cli_structured_query_exports_analytics_and_error_branches(tmp_path: Path) -> None:
+    runner = CliRunner()
+    store_dir = tmp_path / "store"
+    ing = tmp_path / "ing.jsonl"
+    mp = tmp_path / "mp.jsonl"
+    src_csv = tmp_path / "facts.csv"
+    src_csv.write_text(
+        "subject,subject_type,predicate,object,object_type,statement,category,tags,reliability\n"
+        'Civic Honors,ORG,PUBLISHED_IN,2006,DATE,"Civic Honors was published in 2006.",Pub,"civic,book",VERIFIED\n',
+        encoding="utf-8",
+    )
+    assert runner.invoke(app, ["ingest", "-f", str(src_csv), "-o", str(ing)]).exit_code == 0
+    assert runner.invoke(app, ["map", "-i", str(ing), "-o", str(mp)]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            ["reduce", "--layer-id", "q-layer", "--name", "Q", "-i", str(mp), "-s", str(store_dir)],
+        ).exit_code
+        == 0
+    )
+
+    # Structured filter query branch (--category + --tag + --query)
+    q_filtered = runner.invoke(
+        app,
+        [
+            "query",
+            "q-layer",
+            "--category",
+            "Pub",
+            "--tag",
+            "civic",
+            "--query",
+            "Civic Honors",
+            "-s",
+            str(store_dir),
+        ],
+    )
+    assert q_filtered.exit_code == 0, q_filtered.stdout
+    assert len(json.loads(q_filtered.stdout)) == 1
+
+    # Export sharded_jsonl, gexf, markdown, and invalid format
+    assert (
+        runner.invoke(
+            app,
+            [
+                "export",
+                "q-layer",
+                "-f",
+                "sharded_jsonl",
+                "-o",
+                str(tmp_path / "shards"),
+                "-s",
+                str(store_dir),
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "export",
+                "q-layer",
+                "-f",
+                "gexf",
+                "-o",
+                str(tmp_path / "q.gexf"),
+                "-s",
+                str(store_dir),
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "export",
+                "q-layer",
+                "-f",
+                "markdown",
+                "-o",
+                str(tmp_path / "q.md"),
+                "-s",
+                str(store_dir),
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["export", "q-layer", "-f", "bogus", "-o", str(tmp_path / "bad"), "-s", str(store_dir)],
+        ).exit_code
+        == 1
+    )
+
+    # Analytics & catalog commands
+    assert runner.invoke(app, ["layers", "-s", str(store_dir)]).exit_code == 0
+    assert runner.invoke(app, ["lineage", "q-layer", "-s", str(store_dir)]).exit_code == 0
+    assert runner.invoke(app, ["analyze", "q-layer", "-s", str(store_dir)]).exit_code == 0
+
+    # Corrupt claims/entities to exercise `validate --strict` failure exit code 1
+    from knowledgereduce.models import Claim, KnowledgeLayer, LayerData
+    from knowledgereduce.storage import DuckDBParquetStore
+
+    DuckDBParquetStore(store_dir).save_layer(
+        LayerData(
+            layer=KnowledgeLayer(layer_id="bad-layer", name="Bad"),
+            claims=[
+                Claim(claim_id="c1", statement="Dangling subject claim.", subject_id="missing_ent")
+            ],
+        )
+    )
+    assert (
+        runner.invoke(app, ["validate", "bad-layer", "--strict", "-s", str(store_dir)]).exit_code
+        == 1
+    )
+
+    # Representative error exits across CLI subcommands
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("layer_id: [unclosed", encoding="utf-8")
+    for argv in [
+        ["run", str(bad_yaml)],
+        [
+            "reduce",
+            "--layer-id",
+            "x",
+            "--name",
+            "X",
+            "-i",
+            str(tmp_path / "missing.jsonl"),
+            "-s",
+            str(store_dir),
+        ],
+        ["stack", "--layer", "missing-a", "--target", "out", "-s", str(store_dir)],
+        ["diff", "missing-a", "q-layer", "-s", str(store_dir)],
+        ["conflicts", "missing-a", "-s", str(store_dir)],
+        [
+            "resolve-conflict",
+            "missing-a",
+            "--conflict-id",
+            "cf1",
+            "--target",
+            "out",
+            "--winning-value",
+            "x",
+            "-s",
+            str(store_dir),
+        ],
+        ["lineage", "missing-a", "-s", str(store_dir)],
+        ["analyze", "missing-a", "-s", str(store_dir)],
+        ["index", "missing-a", "-s", str(store_dir)],
+    ]:
+        res_err = runner.invoke(app, argv)
+        assert res_err.exit_code == 1, f"Expected exit 1 for {argv}: {res_err.output}"
