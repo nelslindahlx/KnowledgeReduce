@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from knowledgereduce.map.base import deterministic_id
@@ -49,6 +50,9 @@ DEFAULT_FUNCTIONAL_PREDICATES: frozenset[str] = frozenset(
 )
 
 
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
 def is_functional_predicate(
     predicate: str,
     functional_predicates: frozenset[str] | None = None,
@@ -80,6 +84,116 @@ def _claim_rank_key(
     trust = source_trust.get(claim.source_id, 0.5)
     ts = (claim.published_at or claim.updated_at).timestamp()
     return (trust, int(claim.reliability), claim.confidence, ts, claim.claim_id)
+
+
+def _resolve_bucket_conflict(
+    key: str,
+    group: list[Claim],
+    by_bucket: dict[str, list[Claim]],
+    source_trust: dict[str, float],
+    strategy: ConflictStrategy,
+    *,
+    bucket_value_fn: Callable[[Claim], str],
+    display_value_fn: Callable[[str, list[Claim]], str | None],
+) -> tuple[list[Claim], list[Relation], ConflictRecord]:
+    """Resolve one multi-valued or temporal-year conflict group cleanly."""
+    candidates: list[dict[str, object]] = []
+    for bucket_key, bucket_claims in by_bucket.items():
+        display_val = display_value_fn(bucket_key, bucket_claims) or ""
+        weighted_support = sum(
+            source_trust.get(c.source_id, 0.5) * c.confidence * (int(c.reliability) + 1)
+            for c in bucket_claims
+        )
+        candidates.append(
+            {
+                "value": display_val,
+                "claim_ids": [c.claim_id for c in bucket_claims],
+                "source_ids": list(
+                    dict.fromkeys(c.source_id for c in bucket_claims if c.source_id)
+                ),
+                "weighted_support": round(weighted_support, 4),
+                "max_trust": max(source_trust.get(c.source_id, 0.5) for c in bucket_claims),
+                "max_reliability": max(int(c.reliability) for c in bucket_claims),
+                "latest_ts": max(
+                    (c.published_at or c.updated_at).isoformat() for c in bucket_claims
+                ),
+            }
+        )
+
+    if strategy == ConflictStrategy.WEIGHTED_CONSENSUS:
+        winning_key = max(
+            by_bucket.keys(),
+            key=lambda bk: sum(
+                source_trust.get(c.source_id, 0.5) * c.confidence * (int(c.reliability) + 1)
+                for c in by_bucket[bk]
+            ),
+        )
+    elif strategy == ConflictStrategy.LATEST_TIMESTAMP:
+        winning_key = max(
+            by_bucket.keys(),
+            key=lambda bk: max((c.published_at or c.updated_at).timestamp() for c in by_bucket[bk]),
+        )
+    else:
+        # Both PRESERVE_DISPUTE (provisional winner) and SOURCE_TRUST_PRIORITY rank by trust/reliability.
+        winning_key = max(
+            by_bucket.keys(),
+            key=lambda bk: max(_claim_rank_key(c, source_trust) for c in by_bucket[bk]),
+        )
+
+    winning_claims = by_bucket[winning_key]
+    provisional_winner = max(winning_claims, key=lambda c: _claim_rank_key(c, source_trust))
+    winning_display = display_value_fn(winning_key, winning_claims)
+
+    emitted_claims: list[Claim] = []
+    contradiction_relations: list[Relation] = []
+    if strategy == ConflictStrategy.PRESERVE_DISPUTE:
+        for clm in group:
+            updated = clm.model_copy(update={"needs_review": True})
+            emitted_claims.append(updated)
+            clm_bucket = bucket_value_fn(clm)
+            if clm.claim_id != provisional_winner.claim_id and clm_bucket != winning_key:
+                rel_id = deterministic_id(
+                    "rel", provisional_winner.claim_id, "CONTRADICTS", clm.claim_id
+                )
+                contradiction_relations.append(
+                    Relation(
+                        relation_id=rel_id,
+                        source_id=provisional_winner.claim_id,
+                        target_id=clm.claim_id,
+                        relation_type="CONTRADICTS",
+                        confidence=1.0,
+                        evidence=[
+                            Evidence(
+                                source_id=provisional_winner.source_id or "conflict_detector",
+                                excerpt=(
+                                    f"Conflict on {key}: {winning_display!r} vs "
+                                    f"{display_value_fn(clm_bucket, [clm])!r}"
+                                ),
+                                extractor_name="conflict_detector",
+                            )
+                        ],
+                    )
+                )
+    else:
+        for clm in winning_claims:
+            emitted_claims.append(clm.model_copy(update={"needs_review": False}))
+
+    record = ConflictRecord(
+        conflict_id=deterministic_id("cf", key),
+        target_type="claim",
+        target_key=key,
+        candidates=candidates,
+        resolution_strategy=strategy,
+        winning_value=winning_display,
+        winning_source_id=provisional_winner.source_id or None,
+        needs_review=(strategy == ConflictStrategy.PRESERVE_DISPUTE),
+        resolution_notes=(
+            "Preserved competing claims with CONTRADICTS edges for review."
+            if strategy == ConflictStrategy.PRESERVE_DISPUTE
+            else f"Automatically resolved via {strategy.value}."
+        ),
+    )
+    return emitted_claims, contradiction_relations, record
 
 
 def resolve_claim_conflicts(
@@ -119,112 +233,51 @@ def resolve_claim_conflicts(
             val = (_claim_asserted_value(clm) or "").strip()
             by_value[val.lower()].append(clm)
 
-        if len(by_value) <= 1:
-            final_claims.extend(group)
+        if len(by_value) > 1:
+            emitted, rels, record = _resolve_bucket_conflict(
+                key,
+                group,
+                by_value,
+                source_trust,
+                strategy,
+                bucket_value_fn=lambda c: (_claim_asserted_value(c) or "").strip().lower(),
+                display_value_fn=lambda _bk, bclaims: _claim_asserted_value(
+                    max(bclaims, key=lambda c: _claim_rank_key(c, source_trust))
+                ),
+            )
+            final_claims.extend(emitted)
+            contradiction_relations.extend(rels)
+            conflicts.append(record)
             continue
 
-        # Build structured candidate summaries.
-        candidates: list[dict[str, object]] = []
-        for _val_low, val_claims in by_value.items():
-            best_for_val = max(val_claims, key=lambda c: _claim_rank_key(c, source_trust))
-            display_val = _claim_asserted_value(best_for_val) or ""
-            weighted_support = sum(
-                source_trust.get(c.source_id, 0.5) * c.confidence * (int(c.reliability) + 1)
-                for c in val_claims
-            )
-            candidates.append(
-                {
-                    "value": display_val,
-                    "claim_ids": [c.claim_id for c in val_claims],
-                    "source_ids": list(
-                        dict.fromkeys(c.source_id for c in val_claims if c.source_id)
-                    ),
-                    "weighted_support": round(weighted_support, 4),
-                    "max_trust": max(source_trust.get(c.source_id, 0.5) for c in val_claims),
-                    "max_reliability": max(int(c.reliability) for c in val_claims),
-                    "latest_ts": max(
-                        (c.published_at or c.updated_at).isoformat() for c in val_claims
-                    ),
-                }
-            )
+        # Even when object_id/literal matches, catch mutually exclusive single-year assertions.
+        by_year: dict[str, list[Claim]] = defaultdict(list)
+        undated: list[Claim] = []
+        for clm in group:
+            years = sorted(set(_YEAR_RE.findall(clm.statement)))
+            if len(years) == 1:
+                by_year[years[0]].append(clm)
+            else:
+                undated.append(clm)
 
-        if strategy == ConflictStrategy.WEIGHTED_CONSENSUS:
-            winning_val_low = max(
-                by_value.keys(),
-                key=lambda vk: sum(
-                    source_trust.get(c.source_id, 0.5) * c.confidence * (int(c.reliability) + 1)
-                    for c in by_value[vk]
-                ),
+        if len(by_year) > 1:
+            dated_group = [clm for yclaims in by_year.values() for clm in yclaims]
+            emitted, rels, record = _resolve_bucket_conflict(
+                f"{key}::year",
+                dated_group,
+                by_year,
+                source_trust,
+                strategy,
+                bucket_value_fn=lambda c: sorted(set(_YEAR_RE.findall(c.statement)))[0],
+                display_value_fn=lambda bk, _bclaims: bk,
             )
-        elif strategy == ConflictStrategy.LATEST_TIMESTAMP:
-            winning_val_low = max(
-                by_value.keys(),
-                key=lambda vk: max(
-                    (c.published_at or c.updated_at).timestamp() for c in by_value[vk]
-                ),
-            )
-        else:
-            # Both PRESERVE_DISPUTE (provisional winner) and SOURCE_TRUST_PRIORITY rank by trust/reliability.
-            winning_val_low = max(
-                by_value.keys(),
-                key=lambda vk: max(_claim_rank_key(c, source_trust) for c in by_value[vk]),
-            )
+            final_claims.extend(undated)
+            final_claims.extend(emitted)
+            contradiction_relations.extend(rels)
+            conflicts.append(record)
+            continue
 
-        winning_claims = by_value[winning_val_low]
-        provisional_winner = max(winning_claims, key=lambda c: _claim_rank_key(c, source_trust))
-        winning_display = _claim_asserted_value(provisional_winner)
-
-        if strategy == ConflictStrategy.PRESERVE_DISPUTE:
-            for clm in group:
-                updated = clm.model_copy(update={"needs_review": True})
-                final_claims.append(updated)
-                if clm.claim_id != provisional_winner.claim_id and (
-                    (_claim_asserted_value(clm) or "").strip().lower() != winning_val_low
-                ):
-                    rel_id = deterministic_id(
-                        "rel", provisional_winner.claim_id, "CONTRADICTS", clm.claim_id
-                    )
-                    contradiction_relations.append(
-                        Relation(
-                            relation_id=rel_id,
-                            source_id=provisional_winner.claim_id,
-                            target_id=clm.claim_id,
-                            relation_type="CONTRADICTS",
-                            confidence=1.0,
-                            evidence=[
-                                Evidence(
-                                    source_id=provisional_winner.source_id or "conflict_detector",
-                                    excerpt=(
-                                        f"Conflict on {key}: {winning_display!r} vs "
-                                        f"{_claim_asserted_value(clm)!r}"
-                                    ),
-                                    extractor_name="conflict_detector",
-                                )
-                            ],
-                        )
-                    )
-        else:
-            for clm in winning_claims:
-                final_claims.append(clm.model_copy(update={"needs_review": False}))
-
-        conflict_id = deterministic_id("cf", key)
-        conflicts.append(
-            ConflictRecord(
-                conflict_id=conflict_id,
-                target_type="claim",
-                target_key=key,
-                candidates=candidates,
-                resolution_strategy=strategy,
-                winning_value=winning_display,
-                winning_source_id=provisional_winner.source_id or None,
-                needs_review=(strategy == ConflictStrategy.PRESERVE_DISPUTE),
-                resolution_notes=(
-                    "Preserved competing claims with CONTRADICTS edges for review."
-                    if strategy == ConflictStrategy.PRESERVE_DISPUTE
-                    else f"Automatically resolved via {strategy.value}."
-                ),
-            )
-        )
+        final_claims.extend(group)
 
     return final_claims, contradiction_relations, conflicts
 

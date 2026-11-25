@@ -23,25 +23,27 @@ DATASET_DIR = Path(__file__).resolve().parent / "datasets" / "civichonors_book"
 SOURCE_DOC_PATH = DATASET_DIR / "source_document.jsonl"
 GOLD_ANNOTATIONS_PATH = DATASET_DIR / "gold_annotations.json"
 BASELINE_PATH = DATASET_DIR / "baseline_v1_1_0.json"
+BASELINE_V13_PATH = DATASET_DIR / "baseline_v1_3_0.json"
 
 DEFAULT_REGRESSION_FLOORS: dict[str, dict[str, float | int]] = {
     "min": {
-        "core_entity_name_recall": 0.95,
-        "core_entity_typed_recall": 0.70,
-        "core_entity_type_accuracy": 0.72,
-        "alias_merge_recall": 0.80,
-        "core_fact_retention": 0.90,
-        "retrieval_hit_at_1": 0.75,
-        "retrieval_hit_at_5": 0.85,
-        "retrieval_mrr_at_5": 0.75,
-        "claim_connectivity_rate": 0.08,
-        "mean_quality_score": 55.0,
+        "core_entity_name_recall": 0.98,
+        "core_entity_typed_recall": 0.95,
+        "core_entity_type_accuracy": 0.95,
+        "alias_merge_recall": 0.95,
+        "core_fact_retention": 0.98,
+        "retrieval_hit_at_1": 0.95,
+        "retrieval_hit_at_5": 0.95,
+        "retrieval_mrr_at_5": 0.95,
+        "claim_connectivity_rate": 0.45,
+        "grounded_triple_rate": 0.20,
+        "mean_quality_score": 57.0,
     },
     "max": {
-        "cross_type_duplicate_count": 1,
-        "heading_noise_fp_count": 12,
-        "isolated_node_ratio": 0.85,
-        "total_seconds": 30.0,
+        "cross_type_duplicate_count": 0,
+        "heading_noise_fp_count": 0,
+        "isolated_node_ratio": 0.50,
+        "total_seconds": 10.0,
     },
 }
 
@@ -428,6 +430,8 @@ def evaluate_civichonors_book(
 def compare_against_baseline(
     current: BookGoldenMetrics,
     baseline: dict[str, Any],
+    *,
+    enforce_default_floors: bool = True,
 ) -> dict[str, Any]:
     """Compare *current* metrics against a locked baseline snapshot and regression floors."""
     cur_dict = current.to_dict()
@@ -461,8 +465,16 @@ def compare_against_baseline(
             }
 
     floors: dict[str, Any] = dict(baseline.get("regression_floors", {}))
-    min_floors: dict[str, float] = dict(floors.get("min", {}))
-    max_floors: dict[str, float] = dict(floors.get("max", {}))
+    min_floors: dict[str, float] = {k: float(v) for k, v in dict(floors.get("min", {})).items()}
+    max_floors: dict[str, float] = {k: float(v) for k, v in dict(floors.get("max", {})).items()}
+    if enforce_default_floors:
+        for k, v in DEFAULT_REGRESSION_FLOORS["min"].items():
+            prev = min_floors.get(k)
+            min_floors[k] = float(v) if prev is None else max(prev, float(v))
+        for k, v in DEFAULT_REGRESSION_FLOORS["max"].items():
+            prev = max_floors.get(k)
+            max_floors[k] = float(v) if prev is None else min(prev, float(v))
+
     floor_failures: list[str] = []
 
     for metric_name, min_val in min_floors.items():

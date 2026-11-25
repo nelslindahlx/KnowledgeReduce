@@ -38,11 +38,12 @@ _HONORIFIC_PERSON_RE = re.compile(
 _ORG_RE = re.compile(
     r"\b(?:University of [A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*|"
     r"College of [A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*|"
+    r"Institute (?:of|for) [A-Z][A-Za-z&'-]+(?:\s+[A-Z][A-Za-z&'-]+){0,4}|"
     r"Journal (?:of|for) [A-Z][A-Za-z&'-]+(?:\s+[A-Z][A-Za-z&'-]+){0,4}|"
     r"[A-Z][A-Za-z&'-]+(?:\s+(?:[A-Z][A-Za-z&'-]+|of|for|and)){0,4}\s+"
     r"(?:University|College|Department|Institute|Foundation|Corporation|Corp\.|Inc\.|"
-    r"LLC|Company|Program|Press|Journal|Hall|House|Committee|Association|Center|"
-    r"Academy|Commission))\b"
+    r"LLC|Company|Program|Press|Journal|Magazine|Publishers?|Hall|House|Committee|"
+    r"Association|Center|Academy|Commission))\b"
 )
 # Guarded City, State/Country pattern (matches 1-3 word city followed by state/country/postal code).
 _CITY_STATE_RE = re.compile(
@@ -58,8 +59,8 @@ _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _CAP_PHRASE_RE = re.compile(
     r"\b[A-Z][A-Za-z0-9'-]+(?:\s+(?:of|for|the)?\s*[A-Z][A-Za-z0-9'-]+){1,4}\b"
 )
-# CamelCase / PascalCase technical or system identifiers (e.g., KnowledgeReduce, DuckDB, MapReduce).
-_CAMEL_ENTITY_RE = re.compile(r"\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b")
+# CamelCase / PascalCase technical or publisher identifiers (e.g., KnowledgeReduce, McGraw-Hill).
+_CAMEL_ENTITY_RE = re.compile(r"\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*(?:-[A-Z][A-Za-z0-9]+)*\b")
 
 _US_STATE_ABBREVS = frozenset(
     {
@@ -395,6 +396,10 @@ _NON_PERSON_KEYWORDS = (
     "habits",
     "volunteering",
     "charity",
+    "magazine",
+    "publisher",
+    "publishers",
+    "brothers",
 )
 
 _ENTITY_TYPE_SPECIFICITY: dict[str, int] = {
@@ -458,7 +463,8 @@ _FACTUAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"\b(?P<subj>(?:Dr\.|Prof\.)?\s*[A-Z][A-Za-z. -]{2,50}?)\s+"
             r"(?P<pred>works at|works for|is affiliated with|taught at|studied at)\s+"
-            r"(?:the\s+)?(?P<obj>[A-Z][A-Za-z0-9 &-]{2,60}?)(?=\s+(?:and|under|to|in)\b|[.,;!?]|$)"
+            r"(?:the\s+)?(?P<obj>[A-Z][A-Za-z0-9 &-]{2,60}?)"
+            r"(?=\s+(?:and|under|to|in|during|while|since|from|between)\b|[.,;!?]|$)"
         ),
         "AFFILIATION",
     ),
@@ -466,7 +472,8 @@ _FACTUAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(
             r"\b(?P<subj>[A-Z][A-Za-z0-9 &-]{2,50}?)\s+"
             r"(?P<pred>is located in|is based in|is headquartered in|began at|began in)\s+"
-            r"(?:the\s+)?(?P<obj>[A-Z][A-Za-z0-9 ,&-]{2,60}?)(?=\s+(?:and|to|for)\b|[.;!?]|$)"
+            r"(?:the\s+)?(?P<obj>[A-Z][A-Za-z0-9 ,&-]{2,60}?)"
+            r"(?=\s+(?:and|to|for|with|where|while|during|[a-z]{3,}ing)\b|[.;!?]|$)"
         ),
         "LOCATION_OR_ORIGIN",
     ),
@@ -474,10 +481,46 @@ _FACTUAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 # Non-functional descriptive predicates for Pass-2 entity-anchored triple grounding.
 _ANCHORED_VERB_MAP: dict[str, str] = {
+    "be": "DESCRIBED_AS",
     "is": "DEFINED_AS",
     "are": "DEFINED_AS",
     "was": "DESCRIBED_AS",
     "were": "DESCRIBED_AS",
+    "entitled": "TITLED",
+    "include": "INCLUDES",
+    "includes": "INCLUDES",
+    "included": "INCLUDED",
+    "link": "LINKS",
+    "links": "LINKS",
+    "bridge": "BRIDGES",
+    "bridges": "BRIDGES",
+    "bridged": "BRIDGED",
+    "educate": "EDUCATES",
+    "educates": "EDUCATES",
+    "educated": "EDUCATED_BY",
+    "emphasize": "EMPHASIZES",
+    "emphasizes": "EMPHASIZES",
+    "emphasized": "EMPHASIZED_BY",
+    "integrate": "INTEGRATES",
+    "integrates": "INTEGRATES",
+    "integrated": "INTEGRATED_BY",
+    "utilize": "UTILIZES",
+    "utilizes": "UTILIZES",
+    "utilized": "UTILIZED_BY",
+    "transform": "TRANSFORMS",
+    "transforms": "TRANSFORMS",
+    "transformed": "TRANSFORMED_BY",
+    "combine": "COMBINES",
+    "combines": "COMBINES",
+    "combined": "COMBINED_BY",
+    "focus": "FOCUSES",
+    "work": "OPERATES",
+    "lead": "LEADS",
+    "leads": "LEADS",
+    "drive": "DRIVES",
+    "drives": "DRIVES",
+    "establish": "ESTABLISHES",
+    "establishes": "ESTABLISHES",
     "represents": "REPRESENTS",
     "means": "MEANS",
     "defines": "DEFINES",
@@ -672,9 +715,11 @@ _ANCHORED_VERB_PATTERN = "|".join(
     re.escape(k) for k in sorted(_ANCHORED_VERB_MAP, key=lambda s: -len(s))
 )
 _ANCHORED_AUX_RE = re.compile(
-    rf"^(?:(?:,\s*[^,;]{{2,35}},)?[\s]+(?:[a-z][a-z'-]*\s+){{0,4}}"
-    rf"(?:(?:can|will|may|must|should|would|could|does|do|also|often|largely|usually|typically|"
-    rf"not\s+only|to|be|being|strives?\s+to|attempts?\s+to|tries?\s+to|helps?\s+to)\s+){{0,3}})"
+    rf"^(?:(?:,\s*[^,;]{{2,70}},)?[\s]+(?:[a-z][a-z'-]*\s+){{0,4}}"
+    rf"(?:(?:has|have|had|is|are|was|were|can|will|may|must|should|would|could|does|do|"
+    rf"also|often|largely|usually|typically|not\s+only|only|never|clearly|actively|"
+    rf"effectively|to|be|been|being|strives?\s+to|attempts?\s+to|tries?\s+to|helps?\s+to|"
+    rf"designed\s+to|intended\s+to)\s+){{0,4}})"
     rf"(?P<verb>{_ANCHORED_VERB_PATTERN})\b\s+(?P<rest>.+)",
     re.IGNORECASE,
 )
@@ -1030,6 +1075,21 @@ def _build_pass2_linker(
     ]
     if len(college_orgs) == 1:
         surface_to_eid.setdefault("the college", college_orgs[0])
+
+    non_press_unis = sorted(
+        (
+            (len(ent.evidence), eid)
+            for eid, ent in entities_by_id.items()
+            if ent.entity_type == "ORG"
+            and "university" in ent.canonical_name.lower()
+            and not ent.canonical_name.lower().endswith(" press")
+        ),
+        reverse=True,
+    )
+    if len(non_press_unis) == 1 or (
+        len(non_press_unis) >= 2 and non_press_unis[0][0] > non_press_unis[1][0]
+    ):
+        surface_to_eid.setdefault("the university", non_press_unis[0][1])
 
     if not surface_to_eid:
         return None, {}
