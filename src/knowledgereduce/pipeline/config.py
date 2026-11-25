@@ -29,6 +29,17 @@ class LocalFileSourceConfig(BaseModel):
     trust_weight: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
+class LocalDirectorySourceConfig(BaseModel):
+    """Configuration for ingesting supported files from a local directory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    patterns: list[str] = Field(default_factory=lambda: ["**/*"])
+    recursive: bool = True
+    trust_weight: float = Field(default=0.75, ge=0.0, le=1.0)
+
+
 class PipelineConfig(BaseModel):
     """End-to-end KnowledgeReduce pipeline configuration."""
 
@@ -41,6 +52,7 @@ class PipelineConfig(BaseModel):
     checkpoint_dir: str | None = None
     web_crawl: CrawlConfig | None = None
     local_files: list[LocalFileSourceConfig] = Field(default_factory=list)
+    local_directories: list[LocalDirectorySourceConfig] = Field(default_factory=list)
     mapper: Literal["deterministic", "spacy", "structured"] = "deterministic"
     spacy_model: str = "en_core_web_sm"
     structured_config: StructuredMappingConfig | None = None

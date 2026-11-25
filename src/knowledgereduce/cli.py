@@ -22,6 +22,7 @@ from knowledgereduce.export import (
 from knowledgereduce.ingest import (
     CrawlConfig,
     WebConnector,
+    ingest_local_directory,
     ingest_local_file,
     read_jsonl_checkpoint,
     write_jsonl_checkpoint,
@@ -109,6 +110,14 @@ def run_command(
 @app.command("ingest")
 def ingest_command(
     files: list[Path] = typer.Option([], "--file", "-f", help="Local files to ingest."),  # noqa: B008
+    dirs: list[Path] = typer.Option(  # noqa: B008
+        [], "--dir", "-d", help="Local directories to ingest."
+    ),
+    globs: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--glob",
+        help="Glob patterns applied when ingesting --dir inputs (repeatable).",
+    ),
     urls: list[str] = typer.Option([], "--url", "-u", help="Seed URLs to crawl."),  # noqa: B008
     output: Path = typer.Option(  # noqa: B008
         Path("checkpoints/01_ingested.jsonl"), "--output", "-o", help="Output JSONL checkpoint."
@@ -124,10 +133,10 @@ def ingest_command(
         Path(".knowledgereduce_store"), "--store", "-s", help="DuckDB/Parquet store directory."
     ),
 ) -> None:
-    """Ingest local files and/or web pages into a JSONL checkpoint."""
+    """Ingest local files, directories, and/or web pages into a JSONL checkpoint."""
     try:
-        if not files and not urls:
-            raise IngestionError("Provide at least one --file or --url input to ingest.")
+        if not files and not dirs and not urls:
+            raise IngestionError("Provide at least one --file, --dir, or --url input to ingest.")
         known_by_uri: dict[str, str] = {}
         known_by_source_id: dict[str, str] = {}
         if incremental_from is not None:
@@ -151,6 +160,13 @@ def ingest_command(
         local_docs: list[SourceDocument] = []
         for path in files:
             local_docs.extend(ingest_local_file(path))
+        for dir_path in dirs:
+            local_docs.extend(
+                ingest_local_directory(
+                    dir_path,
+                    patterns=globs or ("**/*",),
+                )
+            )
         if known_by_uri or known_by_source_id:
             kept_local, local_skipped = filter_unchanged_documents(
                 local_docs, known_by_uri, known_by_source_id

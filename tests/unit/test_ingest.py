@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import sys
+import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -13,15 +16,19 @@ from knowledgereduce.ingest import (
     AsyncWebCrawler,
     CrawlConfig,
     CSVConnector,
+    DirectoryConnector,
     HTMLConnector,
     JSONConnector,
     MarkdownConnector,
+    PDFConnector,
     TextConnector,
     extract_main_text,
+    ingest_local_directory,
     ingest_local_file,
     read_jsonl_checkpoint,
     write_jsonl_checkpoint,
 )
+from knowledgereduce.map import DeterministicNLPMapper
 from knowledgereduce.models import (
     IngestionError,
     PathSecurityError,
@@ -415,3 +422,123 @@ def test_read_jsonl_checkpoint_skips_blanks_and_rejects_invalid_json(tmp_path: P
     bad_ckpt.write_text("{corrupt-json\n", encoding="utf-8")
     with pytest.raises(IngestionError, match="Invalid JSONL record"):
         read_jsonl_checkpoint(bad_ckpt, SourceDocument)
+
+
+def test_markdown_frontmatter_date_tags_and_mapper_propagation(tmp_path: Path) -> None:
+    md_list = tmp_path / "report.md"
+    md_list.write_text(
+        "---\n"
+        "title: Annual Report\n"
+        "author: Nels Lindahl\n"
+        "published_at: 2024-06-15T12:30:00Z\n"
+        "date: 2020-01-01\n"
+        "tags: [Civic, Kansas, Civic]\n"
+        "---\n\n"
+        "Nels Lindahl founded Civic Honors at the University of Kansas in 2006.\n",
+        encoding="utf-8",
+    )
+    docs_list = MarkdownConnector(md_list).ingest()
+    assert len(docs_list) == 1
+    doc = docs_list[0]
+    assert doc.published_at == datetime(2024, 6, 15, 12, 30, tzinfo=UTC)
+    assert doc.metadata["tags"] == ["Civic", "Kansas"]
+
+    batch = DeterministicNLPMapper(min_sentence_length=20).map_document(doc)
+    assert batch.claims
+    assert all("Civic" in clm.tags and "Kansas" in clm.tags for clm in batch.claims)
+
+    md_date_only = tmp_path / "date_only.md"
+    md_date_only.write_text(
+        "---\ndate: 2024-03-15\ntags: policy, Governance\n---\n\nBody text.",
+        encoding="utf-8",
+    )
+    doc_date = MarkdownConnector(md_date_only).ingest()[0]
+    assert doc_date.published_at == datetime(2024, 3, 15, 0, 0, tzinfo=UTC)
+    assert doc_date.metadata["tags"] == ["policy", "Governance"]
+
+    md_invalid_date = tmp_path / "bad_date.md"
+    md_invalid_date.write_text("---\ndate: not-a-date\n---\n\nBody text.", encoding="utf-8")
+    assert MarkdownConnector(md_invalid_date).ingest()[0].published_at is None
+
+
+def test_pdf_connector_missing_extra_extraction_and_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "brief.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")
+
+    monkeypatch.delitem(sys.modules, "pypdf", raising=False)
+    monkeypatch.setattr("importlib.util.find_spec", lambda _name: None)
+    with pytest.raises(IngestionError, match="uv sync --extra pdf"):
+        PDFConnector(pdf_path).ingest()
+
+    outside = tmp_path.parent / "outside_secret.pdf"
+    with pytest.raises(PathSecurityError):
+        PDFConnector(outside, base_dir=tmp_path).ingest()
+
+    class _FakePage:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class _FakePdfReader:
+        def __init__(self, _file_path: str) -> None:
+            self.pages = [_FakePage("First page text."), _FakePage("  Second page text.  ")]
+            self.metadata = {"/Title": "PDF Briefing", "/Author": "Jane Doe"}
+
+    fake_mod = types.ModuleType("pypdf")
+    fake_mod.PdfReader = _FakePdfReader  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pypdf", fake_mod)
+
+    docs = ingest_local_file(pdf_path, trust_weight=0.85)
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.source_type == SourceType.PDF
+    assert doc.title == "PDF Briefing"
+    assert doc.author == "Jane Doe"
+    assert doc.content == "First page text.\n\nSecond page text."
+    assert doc.metadata["page_count"] == 2
+    assert doc.trust_weight == 0.85
+
+
+def test_directory_connector_globs_filtering_and_symlink_safety(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = tmp_path / "corpus"
+    nested = corpus / "sub"
+    hidden_dir = corpus / ".hidden"
+    nested.mkdir(parents=True)
+    hidden_dir.mkdir(parents=True)
+
+    (corpus / "top.md").write_text("---\ntitle: Top Note\n---\n\nTop body.", encoding="utf-8")
+    (corpus / "notes.txt").write_text("Plain top notes.", encoding="utf-8")
+    (corpus / "ignored.bin").write_bytes(b"\x00\x01\x02")
+    (corpus / "skip.pdf").write_bytes(b"%PDF-1.4\n")
+    (corpus / ".dotfile.md").write_text("Hidden file.", encoding="utf-8")
+    (hidden_dir / "secret.md").write_text("Hidden dir file.", encoding="utf-8")
+    (nested / "deep.md").write_text("Deep markdown note.", encoding="utf-8")
+
+    monkeypatch.delitem(sys.modules, "pypdf", raising=False)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+    docs_all = DirectoryConnector(corpus).ingest()
+    titles_all = {d.title for d in docs_all}
+    assert titles_all == {"Top Note", "notes.txt", "deep"}
+
+    docs_shallow_md = ingest_local_directory(corpus, patterns=["**/*.md"], recursive=False)
+    assert [d.title for d in docs_shallow_md] == ["Top Note"]
+
+    with pytest.raises(IngestionError, match="uv sync --extra pdf"):
+        ingest_local_directory(corpus, patterns=["*.pdf"], recursive=False)
+
+    with pytest.raises(IngestionError, match="Input directory not found"):
+        ingest_local_directory(tmp_path / "does_not_exist")
+
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_text("Outside target.", encoding="utf-8")
+    escape_link = corpus / "escape.md"
+    escape_link.symlink_to(outside_file)
+    with pytest.raises(PathSecurityError):
+        ingest_local_directory(corpus)
