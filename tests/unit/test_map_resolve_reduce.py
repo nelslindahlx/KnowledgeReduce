@@ -699,3 +699,39 @@ def test_integrity_validator_catches_duplicates_dangling_refs_and_warnings() -> 
     # 4 duplicate-ID errors + 4 claim subject/object errors + 4 relation source/target errors
     assert len(report.errors) == 12
     assert len(report.warnings) == 4
+
+
+def test_deterministic_nlp_mapper_filters_headings_questions_and_propagates_section_notes() -> None:
+    doc = SourceDocument(
+        source_id="src-hygiene",
+        uri="https://civichonors.com/hygiene",
+        source_type=SourceType.WEB,
+        title="Civic Honors",
+        content=(
+            "Chapter 1: Introduction\n"
+            "Dr. Nels Lindahl — June 14, 2020 — Denver, Colorado\n"
+            "How does a university launch civic recognition programs?\n"
+            "Civic Honors was published in 2006 to inspire student service."
+        ),
+        trust_weight=0.90,
+    )
+
+    default_batch = DeterministicNLPMapper(min_sentence_length=25).map_document(doc)
+    stmts = [c.statement for c in default_batch.claims]
+    assert not any(s.startswith("Chapter 1:") for s in stmts)
+    assert not any(s.endswith("?") for s in stmts)
+    assert any("June 14, 2020" in s for s in stmts)
+    assert len(default_batch.claims) == 2
+    assert all(
+        c.contextual_notes == "Section: Chapter 1: Introduction" for c in default_batch.claims
+    )
+
+    raw_batch = DeterministicNLPMapper(
+        min_sentence_length=20,
+        skip_headings=False,
+        skip_questions=False,
+    ).map_document(doc)
+    raw_stmts = [c.statement for c in raw_batch.claims]
+    assert any(s.startswith("Chapter 1:") for s in raw_stmts)
+    assert any(s.endswith("?") for s in raw_stmts)
+    assert len(raw_batch.claims) == 4

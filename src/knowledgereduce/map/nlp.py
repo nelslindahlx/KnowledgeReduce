@@ -709,6 +709,75 @@ _ANCHORED_VERB_MAP: dict[str, str] = {
     "sustained": "SUSTAINED_BY",
     "defined": "DEFINED_BY",
     "shared": "SHARED_BY",
+    "broaden": "BROADENS",
+    "broadens": "BROADENS",
+    "broadened": "BROADENED_BY",
+    "broadening": "BROADENS",
+    "fostering": "FOSTERS",
+    "creating": "CREATES",
+    "developing": "DEVELOPS",
+    "strengthening": "STRENGTHENS",
+    "maintaining": "MAINTAINS",
+    "maintains": "MAINTAINS",
+    "maintain": "MAINTAINS",
+    "acknowledging": "ACKNOWLEDGES",
+    "illustrates": "ILLUSTRATES",
+    "illustrate": "ILLUSTRATES",
+    "illustrated": "ILLUSTRATED_BY",
+    "highlights": "HIGHLIGHTS",
+    "highlight": "HIGHLIGHTS",
+    "highlighted": "HIGHLIGHTED_BY",
+    "explains": "EXPLAINS",
+    "explain": "EXPLAINS",
+    "explained": "EXPLAINED_BY",
+    "describes": "DESCRIBES",
+    "describe": "DESCRIBES",
+    "suggests": "SUGGESTS",
+    "suggest": "SUGGESTS",
+    "suggested": "SUGGESTED_BY",
+    "indicates": "INDICATES",
+    "indicate": "INDICATES",
+    "indicated": "INDICATED_BY",
+    "reflects": "REFLECTS",
+    "reflect": "REFLECTS",
+    "reflected": "REFLECTED_BY",
+    "contributes": "CONTRIBUTES",
+    "contribute": "CONTRIBUTES",
+    "participates": "PARTICIPATES",
+    "participate": "PARTICIPATES",
+    "transfers": "TRANSFERS",
+    "transfer": "TRANSFERS",
+    "generates": "GENERATES",
+    "generate": "GENERATES",
+    "recruits": "RECRUITS",
+    "recruit": "RECRUITS",
+    "recruited": "RECRUITED_BY",
+    "evaluates": "EVALUATES",
+    "evaluate": "EVALUATES",
+    "pays": "YIELDS",
+    "pay": "YIELDS",
+    "holds": "CONTAINS",
+    "hold": "CONTAINS",
+    "sparks": "SPARKS",
+    "spark": "SPARKS",
+    "redefines": "REDEFINES",
+    "redefine": "REDEFINES",
+    "addressed": "ADDRESSED_BY",
+    "served": "SERVED_BY",
+    "inspired": "INSPIRED_BY",
+    "motivated": "MOTIVATED_BY",
+    "enabled": "ENABLED_BY",
+    "allowed": "ALLOWED_BY",
+    "provided": "PROVIDED_BY",
+    "spreading": "SPREADS",
+    "connecting": "CONNECTS",
+    "helping": "HELPS",
+    "helped": "HELPED_BY",
+    "defining": "DEFINES",
+    "becoming": "BECOMES",
+    "tapping": "UTILIZES",
+    "taps": "UTILIZES",
+    "tap": "UTILIZES",
 }
 
 _ANCHORED_VERB_PATTERN = "|".join(
@@ -716,10 +785,12 @@ _ANCHORED_VERB_PATTERN = "|".join(
 )
 _ANCHORED_AUX_RE = re.compile(
     rf"^(?:(?:,\s*[^,;]{{2,70}},)?[\s]+(?:[a-z][a-z'-]*\s+){{0,4}}"
-    rf"(?:(?:has|have|had|is|are|was|were|can|will|may|must|should|would|could|does|do|"
-    rf"also|often|largely|usually|typically|not\s+only|only|never|clearly|actively|"
-    rf"effectively|to|be|been|being|strives?\s+to|attempts?\s+to|tries?\s+to|helps?\s+to|"
-    rf"designed\s+to|intended\s+to)\s+){{0,4}})"
+    rf"(?:(?:has|have|had|is|are|was|were|can|will|may|must|should|would|could|does|do|did|"
+    rf"not|also|often|largely|usually|typically|not\s+only|only|never|clearly|actively|"
+    rf"effectively|to|be|been|being|has\s+to|have\s+to|needs?\s+to|is\s+able\s+to|"
+    rf"are\s+able\s+to|has\s+the\s+potential\s+to|have\s+the\s+potential\s+to|"
+    rf"capable\s+of|strives?\s+to|attempts?\s+to|tries?\s+to|helps?\s+to|"
+    rf"designed\s+to|intended\s+to|willing\s+to)\s+){{0,5}})"
     rf"(?P<verb>{_ANCHORED_VERB_PATTERN})\b\s+(?P<rest>.+)",
     re.IGNORECASE,
 )
@@ -1124,8 +1195,16 @@ class DeterministicNLPMapper:
 
     name: str = "deterministic_nlp_mapper"
 
-    def __init__(self, min_sentence_length: int = 25) -> None:
+    def __init__(
+        self,
+        min_sentence_length: int = 25,
+        *,
+        skip_headings: bool = True,
+        skip_questions: bool = True,
+    ) -> None:
         self.min_sentence_length = min_sentence_length
+        self.skip_headings = skip_headings
+        self.skip_questions = skip_questions
 
     def map_document(self, doc: SourceDocument) -> MappedBatch:
         """Extract entities, claims, and grounded relations using two-pass document linking."""
@@ -1134,11 +1213,17 @@ class DeterministicNLPMapper:
 
         # Pass 1: Extract sentences & consolidate canonical entity types across the whole document.
         sentence_records: list[
-            tuple[str, int, int, Evidence, list[tuple[str, str, list[str]]]]
+            tuple[str, int, int, Evidence, list[tuple[str, str, list[str]]], str | None]
         ] = []
         consolidated: dict[str, dict[str, Any]] = {}
+        current_section: str | None = None
 
         for sentence, start, end in split_sentences(doc.content):
+            if self.skip_headings and _is_heading_line(sentence):
+                current_section = sentence
+                continue
+            if self.skip_questions and sentence.rstrip().endswith("?"):
+                continue
             if len(sentence) < self.min_sentence_length:
                 continue
             evidence = Evidence(
@@ -1150,7 +1235,7 @@ class DeterministicNLPMapper:
                 extraction_confidence=min(1.0, max(0.4, doc.trust_weight)),
             )
             extracted = _extract_entities_from_sentence(sentence)
-            sentence_records.append((sentence, start, end, evidence, extracted))
+            sentence_records.append((sentence, start, end, evidence, extracted, current_section))
 
             for cname, etype, aliases in extracted:
                 key = " ".join(cname.strip().lower().split())
@@ -1215,7 +1300,7 @@ class DeterministicNLPMapper:
         claims: list[Claim] = []
         relations_by_id: dict[str, Relation] = {}
 
-        for sentence, _start, _end, evidence, extracted in sentence_records:
+        for sentence, _start, _end, evidence, extracted, section in sentence_records:
             pass1_eids = [
                 key_to_eid[" ".join(cname.strip().lower().split())]
                 for cname, _etype, _aliases in extracted
@@ -1325,6 +1410,7 @@ class DeterministicNLPMapper:
                     statement=sentence,
                     category="ExtractedFact",
                     tags=tags,
+                    contextual_notes=f"Section: {section}" if section else "",
                     reliability=default_reliability,
                     source_id=doc.source_id,
                     source_title=doc.title,
