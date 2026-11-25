@@ -44,6 +44,8 @@ class PipelineConfig(BaseModel):
     mapper: Literal["deterministic", "spacy", "structured"] = "deterministic"
     spacy_model: str = "en_core_web_sm"
     structured_config: StructuredMappingConfig | None = None
+    skip_headings: bool = True
+    skip_questions: bool = True
     min_sentence_length: int = Field(default=25, ge=0)
     min_claim_length: int = Field(default=20, ge=0)
     lexical_threshold: float = Field(default=0.88, gt=0.0, le=1.0)

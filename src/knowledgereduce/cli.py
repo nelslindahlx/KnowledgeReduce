@@ -131,9 +131,8 @@ def ingest_command(
         known_by_uri: dict[str, str] = {}
         known_by_source_id: dict[str, str] = {}
         if incremental_from is not None:
-            known_by_uri, known_by_source_id = load_layer_source_hashes(
-                DuckDBParquetStore(store_dir), incremental_from
-            )
+            with DuckDBParquetStore(store_dir) as store:
+                known_by_uri, known_by_source_id = load_layer_source_hashes(store, incremental_from)
 
         skipped_unchanged = 0
         docs: list[SourceDocument] = []
@@ -256,11 +255,12 @@ def reduce_command(
             build_embeddings_index=build_index,
             overwrite=overwrite,
         )
-        layer_data = PipelineRunner(store=DuckDBParquetStore(store_dir)).reduce_and_store(
-            batches,
-            cfg,
-            parent_layer_ids=parent_layers or None,
-        )
+        with DuckDBParquetStore(store_dir) as store:
+            layer_data = PipelineRunner(store=store).reduce_and_store(
+                batches,
+                cfg,
+                parent_layer_ids=parent_layers or None,
+            )
         typer.echo(layer_data.layer.model_dump_json(indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -292,17 +292,17 @@ def stack_command(
 ) -> None:
     """Stack or combine immutable knowledge layers (overlay, union, intersection, difference)."""
     try:
-        store = DuckDBParquetStore(store_dir)
-        stacked = StackManager(store).merge_layers(
-            layer_ids,
-            target_layer_id=target_layer_id,
-            mode=mode,
-            conflict_strategy=conflict_strategy,
-            reconcile=reconcile,
-            overwrite=overwrite,
-        )
-        if build_index and stacked.claims:
-            HybridGraphRAGRetriever(store).build_index(target_layer_id)
+        with DuckDBParquetStore(store_dir) as store:
+            stacked = StackManager(store).merge_layers(
+                layer_ids,
+                target_layer_id=target_layer_id,
+                mode=mode,
+                conflict_strategy=conflict_strategy,
+                reconcile=reconcile,
+                overwrite=overwrite,
+            )
+            if build_index and stacked.claims:
+                HybridGraphRAGRetriever(store).build_index(target_layer_id)
         typer.echo(stacked.layer.model_dump_json(indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -318,8 +318,8 @@ def index_command(
 ) -> None:
     """Build or refresh persisted claim embeddings for a stored layer."""
     try:
-        store = DuckDBParquetStore(store_dir)
-        indexed = HybridGraphRAGRetriever(store).build_index(layer_id)
+        with DuckDBParquetStore(store_dir) as store:
+            indexed = HybridGraphRAGRetriever(store).build_index(layer_id)
         typer.echo(json.dumps({"layer_id": layer_id, "embeddings_indexed": indexed}, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -336,9 +336,8 @@ def diff_command(
 ) -> None:
     """Show structural diff between two knowledge layers."""
     try:
-        diff = StackManager(DuckDBParquetStore(store_dir)).diff_layers(
-            left_layer_id, right_layer_id
-        )
+        with DuckDBParquetStore(store_dir) as store:
+            diff = StackManager(store).diff_layers(left_layer_id, right_layer_id)
         typer.echo(diff.model_dump_json(indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -360,27 +359,27 @@ def query_command(
 ) -> None:
     """Query claims and entities via Hybrid GraphRAG or structured filters."""
     try:
-        store = DuckDBParquetStore(store_dir)
         rel_rating = ReliabilityRating(min_reliability)
-        if query.strip() and category is None and tag is None:
-            ctx = HybridGraphRAGRetriever(store).retrieve(
-                layer_id,
-                query,
-                top_k=top_k,
-                hops=hops,
-                min_reliability=rel_rating,
-            )
-            typer.echo(ctx.model_dump_json(indent=2))
-            return
+        with DuckDBParquetStore(store_dir) as store:
+            if query.strip() and category is None and tag is None:
+                ctx = HybridGraphRAGRetriever(store).retrieve(
+                    layer_id,
+                    query,
+                    top_k=top_k,
+                    hops=hops,
+                    min_reliability=rel_rating,
+                )
+                typer.echo(ctx.model_dump_json(indent=2))
+                return
 
-        qb = QueryBuilder(store, layer_id).filter_min_reliability(rel_rating)
-        if category is not None:
-            qb = qb.filter_category(category)
-        if tag is not None:
-            qb = qb.filter_tag(tag)
-        if query.strip():
-            qb = qb.filter_text(query)
-        claims = qb.limit(top_k).execute_claims()
+            qb = QueryBuilder(store, layer_id).filter_min_reliability(rel_rating)
+            if category is not None:
+                qb = qb.filter_category(category)
+            if tag is not None:
+                qb = qb.filter_tag(tag)
+            if query.strip():
+                qb = qb.filter_text(query)
+            claims = qb.limit(top_k).execute_claims()
         typer.echo(json.dumps([c.model_dump(mode="json") for c in claims], indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -402,7 +401,8 @@ def export_command(
 ) -> None:
     """Export a layer to portable JSON, sharded JSONL, GraphML, GEXF, or Markdown."""
     try:
-        layer_data = DuckDBParquetStore(store_dir).load_layer(layer_id)
+        with DuckDBParquetStore(store_dir) as store:
+            layer_data = store.load_layer(layer_id)
         fmt = format.strip().lower()
         if fmt == "json":
             out = export_layer_json(layer_data, output)
@@ -434,7 +434,8 @@ def validate_command(
 ) -> None:
     """Validate referential integrity and compute metrics for a stored layer."""
     try:
-        layer_data = DuckDBParquetStore(store_dir).load_layer(layer_id)
+        with DuckDBParquetStore(store_dir) as store:
+            layer_data = store.load_layer(layer_id)
         report = IntegrityValidator().validate(layer_data, strict=False)
         typer.echo(report.model_dump_json(indent=2))
         if strict and not report.valid:
@@ -455,12 +456,12 @@ def conflicts_command(
 ) -> None:
     """List preserved or adjudicated conflicts in a stored layer."""
     try:
-        store = DuckDBParquetStore(store_dir)
-        conflicts = store.list_conflicts(
-            layer_id,
-            needs_review=None if show_all else True,
-            limit=limit,
-        )
+        with DuckDBParquetStore(store_dir) as store:
+            conflicts = store.list_conflicts(
+                layer_id,
+                needs_review=None if show_all else True,
+                limit=limit,
+            )
         typer.echo(
             json.dumps(
                 {
@@ -493,17 +494,17 @@ def resolve_conflict_command(
 ) -> None:
     """Adjudicate a conflict non-destructively into a new CURATED child layer."""
     try:
-        store = DuckDBParquetStore(store_dir)
-        base_data = store.load_layer(base_layer_id)
-        curated, updated_conflict = adjudicate_conflict(
-            base_data,
-            conflict_id=conflict_id,
-            target_layer_id=target_layer_id,
-            winning_value=winning_value,
-            winning_source_id=winning_source_id,
-            resolution_notes=notes or "Adjudicated via CLI resolve-conflict.",
-        )
-        store.save_layer(curated, overwrite=overwrite)
+        with DuckDBParquetStore(store_dir) as store:
+            base_data = store.load_layer(base_layer_id)
+            curated, updated_conflict = adjudicate_conflict(
+                base_data,
+                conflict_id=conflict_id,
+                target_layer_id=target_layer_id,
+                winning_value=winning_value,
+                winning_source_id=winning_source_id,
+                resolution_notes=notes or "Adjudicated via CLI resolve-conflict.",
+            )
+            store.save_layer(curated, overwrite=overwrite)
         typer.echo(
             json.dumps(
                 {
@@ -526,7 +527,8 @@ def layers_command(
 ) -> None:
     """List persisted knowledge layers and their metadata."""
     try:
-        payload = build_layers_payload(DuckDBParquetStore(store_dir))
+        with DuckDBParquetStore(store_dir) as store:
+            payload = build_layers_payload(store)
         typer.echo(json.dumps(payload, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -542,8 +544,10 @@ def lineage_command(
 ) -> None:
     """Display ancestor and descendant layer lineage for a stored layer."""
     try:
-        mgr = StackManager(DuckDBParquetStore(store_dir))
-        typer.echo(json.dumps(build_layer_lineage_payload(mgr, layer_id), indent=2))
+        with DuckDBParquetStore(store_dir) as store:
+            mgr = StackManager(store)
+            payload = build_layer_lineage_payload(mgr, layer_id)
+        typer.echo(json.dumps(payload, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -566,16 +570,17 @@ def analyze_command(
 ) -> None:
     """Compute node centrality, Louvain communities, and optional shortest paths."""
     try:
-        payload = build_graph_analytics_payload(
-            DuckDBParquetStore(store_dir),
-            layer_id,
-            metric=metric,
-            top_k=top_k,
-            include_communities=communities,
-            path_source_id=path_from,
-            path_target_id=path_to,
-            max_hops=max_hops,
-        )
+        with DuckDBParquetStore(store_dir) as store:
+            payload = build_graph_analytics_payload(
+                store,
+                layer_id,
+                metric=metric,
+                top_k=top_k,
+                include_communities=communities,
+                path_source_id=path_from,
+                path_target_id=path_to,
+                max_hops=max_hops,
+            )
         typer.echo(json.dumps(payload, indent=2))
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)

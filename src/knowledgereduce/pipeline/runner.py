@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from knowledgereduce.map import (
     load_mapped_batches,
     save_mapped_batches,
 )
+from knowledgereduce.map.structured import StructuredMappingConfig
 from knowledgereduce.models import (
     LayerData,
     LayerTier,
@@ -46,16 +48,22 @@ from knowledgereduce.storage import DuckDBParquetStore, GraphStore
 logger = structlog.get_logger(__name__)
 
 
-def _map_single_doc_worker(args: tuple[SourceDocument, str, int]) -> MappedBatch:
+def _map_single_doc_worker(
+    args: tuple[SourceDocument, str, int, StructuredMappingConfig | None, bool, bool],
+) -> MappedBatch:
     """Top-level picklable worker for parallel Map execution."""
-    doc, mapper_kind, min_len = args
+    doc, mapper_kind, min_len, structured_cfg, skip_headings, skip_questions = args
     if mapper_kind == "structured" or doc.source_type in {
         SourceType.CSV,
         SourceType.JSON,
         SourceType.JSONL,
     }:
-        return StructuredMapper().map_document(doc)
-    return DeterministicNLPMapper(min_sentence_length=min_len).map_document(doc)
+        return StructuredMapper(structured_cfg).map_document(doc)
+    return DeterministicNLPMapper(
+        min_sentence_length=min_len,
+        skip_headings=skip_headings,
+        skip_questions=skip_questions,
+    ).map_document(doc)
 
 
 def build_mapper(config: PipelineConfig) -> Mapper:
@@ -67,7 +75,11 @@ def build_mapper(config: PipelineConfig) -> Mapper:
             model_name=config.spacy_model,
             min_sentence_length=config.min_sentence_length,
         )
-    return DeterministicNLPMapper(min_sentence_length=config.min_sentence_length)
+    return DeterministicNLPMapper(
+        min_sentence_length=config.min_sentence_length,
+        skip_headings=config.skip_headings,
+        skip_questions=config.skip_questions,
+    )
 
 
 def build_embedding_provider(config: PipelineConfig) -> EmbeddingProvider:
@@ -130,6 +142,14 @@ class PipelineRunner:
             return self._explicit_store
         return DuckDBParquetStore(config.store_dir)
 
+    @contextlib.contextmanager
+    def _open_store(self, config: PipelineConfig) -> Iterator[GraphStore]:
+        if self._explicit_store is not None:
+            yield self._explicit_store
+            return
+        with DuckDBParquetStore(config.store_dir) as store:
+            yield store
+
     def _load_known_source_hashes(
         self,
         config: PipelineConfig,
@@ -137,7 +157,8 @@ class PipelineRunner:
         """Load prior source SHA-256 digests from ``incremental_from_layer``."""
         if config.incremental_from_layer is None:
             return {}, {}
-        return load_layer_source_hashes(self._get_store(config), config.incremental_from_layer)
+        with self._open_store(config) as store:
+            return load_layer_source_hashes(store, config.incremental_from_layer)
 
     def ingest(self, config: PipelineConfig) -> list[SourceDocument]:
         """Run stage 1 (Ingestion) and write ``01_ingested.jsonl`` if checkpoints enabled."""
@@ -197,7 +218,17 @@ class PipelineRunner:
         if not docs:
             batches: list[MappedBatch] = []
         elif config.max_workers > 1 and len(docs) > 1 and config.mapper == "deterministic":
-            payload = [(doc, config.mapper, config.min_sentence_length) for doc in docs]
+            payload = [
+                (
+                    doc,
+                    config.mapper,
+                    config.min_sentence_length,
+                    config.structured_config,
+                    config.skip_headings,
+                    config.skip_questions,
+                )
+                for doc in docs
+            ]
             with ProcessPoolExecutor(max_workers=config.max_workers) as pool:
                 batches = list(pool.map(_map_single_doc_worker, payload))
         else:
@@ -261,18 +292,18 @@ class PipelineRunner:
             ckpt = Path(config.checkpoint_dir) / "03_resolved.jsonl"
             write_jsonl_checkpoint([layer_data], ckpt)
 
-        store = self._get_store(config)
-        store.save_layer(layer_data, overwrite=config.overwrite)
+        with self._open_store(config) as store:
+            store.save_layer(layer_data, overwrite=config.overwrite)
 
-        embeddings_indexed = 0
-        if config.build_embeddings_index and layer_data.claims:
-            retrieval_provider = (
-                cluster_provider
-                if config.use_sentence_transformers
-                else build_retrieval_embedding_provider(config)
-            )
-            retriever = HybridGraphRAGRetriever(store, embedding_provider=retrieval_provider)
-            embeddings_indexed = retriever.build_index(config.layer_id)
+            embeddings_indexed = 0
+            if config.build_embeddings_index and layer_data.claims:
+                retrieval_provider = (
+                    cluster_provider
+                    if config.use_sentence_transformers
+                    else build_retrieval_embedding_provider(config)
+                )
+                retriever = HybridGraphRAGRetriever(store, embedding_provider=retrieval_provider)
+                embeddings_indexed = retriever.build_index(config.layer_id)
 
         logger.info(
             "pipeline_reduced",
