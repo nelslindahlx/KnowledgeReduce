@@ -8,6 +8,7 @@ import pytest
 
 from benchmarks.civichonors_book_benchmark import (
     BASELINE_V13_PATH,
+    BASELINE_V14_PATH,
     SOURCE_DOC_PATH,
     BookEvaluationResult,
     compare_against_baseline,
@@ -17,6 +18,7 @@ from benchmarks.civichonors_book_benchmark import (
     load_gold_annotations,
 )
 from knowledgereduce.map import DeterministicNLPMapper
+from knowledgereduce.map.nlp import _is_heading_line
 from knowledgereduce.models import ConflictStrategy
 from knowledgereduce.reduce import IntegrityValidator, KnowledgeReducer
 
@@ -74,8 +76,18 @@ def test_civichonors_book_meets_v1_1_0_baseline_floors(
     v13_cmp = compare_against_baseline(book_eval.metrics, v13_baseline)
     assert v13_cmp["baseline_version"] == "1.3.0"
     assert v13_cmp["passed_floors"] is True, v13_cmp["floor_failures"]
-    assert book_eval.metrics.grounded_triple_rate >= 0.25
-    assert book_eval.metrics.isolated_node_ratio <= 0.45
+
+    assert BASELINE_V14_PATH.is_file()
+    v14_baseline = load_baseline(BASELINE_V14_PATH)
+    v14_cmp = compare_against_baseline(book_eval.metrics, v14_baseline)
+    assert v14_cmp["baseline_version"] == "1.4.0"
+    assert v14_cmp["passed_floors"] is True, v14_cmp["floor_failures"]
+
+    assert book_eval.metrics.grounded_triple_rate >= 0.28
+    assert book_eval.metrics.mean_quality_score >= 59.0
+    assert book_eval.metrics.isolated_node_ratio <= 0.44
+    assert not any(_is_heading_line(c.statement) for c in book_eval.layer.claims)
+    assert not any(c.statement.rstrip().endswith("?") for c in book_eval.layer.claims)
 
 
 def test_civichonors_book_deterministic_reproducibility(
@@ -111,7 +123,7 @@ def test_baseline_comparison_detects_regressions_and_improvements(
 
     improved = dataclasses.replace(
         book_eval.metrics,
-        core_entity_typed_recall=0.95,
+        core_entity_typed_recall=0.99,
         heading_noise_fp_count=0,
         heading_noise_fp_rate=0.0,
     )
