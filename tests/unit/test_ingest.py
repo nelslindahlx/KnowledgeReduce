@@ -395,3 +395,23 @@ async def test_ingest_fallback_and_crawler_status_and_content_skips(
         await AsyncWebCrawler(
             offsite_cfg, transport=httpx.MockTransport(handler), resolver=_public_dns
         ).crawl()
+
+
+def test_read_jsonl_checkpoint_skips_blanks_and_rejects_invalid_json(tmp_path: Path) -> None:
+    ckpt = tmp_path / "mixed.jsonl"
+    doc = SourceDocument(
+        source_id="ok-1",
+        uri="https://example.org/ok",
+        source_type=SourceType.TEXT,
+        content="Valid content.",
+    )
+    write_jsonl_checkpoint([doc], ckpt)
+    # Inject blank lines around the valid record and verify clean reload.
+    ckpt.write_text("\n" + ckpt.read_text(encoding="utf-8") + "\n   \n", encoding="utf-8")
+    loaded = read_jsonl_checkpoint(ckpt, SourceDocument)
+    assert [d.source_id for d in loaded] == ["ok-1"]
+
+    bad_ckpt = tmp_path / "bad.jsonl"
+    bad_ckpt.write_text("{corrupt-json\n", encoding="utf-8")
+    with pytest.raises(IngestionError, match="Invalid JSONL record"):
+        read_jsonl_checkpoint(bad_ckpt, SourceDocument)

@@ -33,7 +33,7 @@ from knowledgereduce.resolve import HashingEmbeddingProvider
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "Claim",

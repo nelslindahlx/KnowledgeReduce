@@ -413,3 +413,19 @@ def test_hybrid_graphrag_summary_fast_path_matches_fallback_and_uses_contextual_
     ]
     assert fast_ctx.results[0].claim.claim_id == "clm_sec_match"
     duck.close()
+
+
+def test_analytics_edgeless_and_invalid_hop_edges() -> None:
+    import networkx as nx
+
+    g = nx.MultiDiGraph()
+    g.add_node("n2")
+    g.add_node("n1")
+    with pytest.raises(KnowledgeReduceError, match="k must be >= 0"):
+        k_hop_neighborhood(g, "n1", k=-1)
+    assert bounded_shortest_path(g, "n1", "n2", max_hops=-1) is None
+
+    # Edgeless graph yields uniform PageRank and singleton sorted communities.
+    ranked = central_nodes(g, metric="pagerank", top_k=5)
+    assert ranked == [("n1", 0.5), ("n2", 0.5)]
+    assert detect_communities(g) == [["n1"], ["n2"]]
