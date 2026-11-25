@@ -16,6 +16,9 @@ All notable changes to KnowledgeReduce are documented in this file.
 - **Phase 3: Multi-Source Stacked/Incremental Golden Benchmark & Floor Ratchet (`#44`)**:
   - Snapshotted verified `v1.4.0` metrics into `benchmarks/datasets/civichonors_book/baseline_v1_4_0.json`, exported `BASELINE_V14_PATH`, and ratcheted `DEFAULT_REGRESSION_FLOORS` in `benchmarks/civichonors_book_benchmark.py` (`claim_connectivity_rate >= 0.50`, `grounded_triple_rate >= 0.26`, `mean_quality_score >= 59.0`, `isolated_node_ratio <= 0.45`, `total_seconds <= 8.0`).
   - Added offline `benchmarks/multisource_stack_benchmark.py` and `tests/golden/test_multisource_stack_golden.py` exercising `HTMLConnector`, `MarkdownConnector`, `incremental_from_layer` SHA-256 skip-unchanged deltas, pre-warmed embeddings, `StackManager.merge_layers(..., reconcile=True)` over conflicting overlays, GraphRAG conflict surfacing, analytics, and Markdown brief export, wired into `make golden`.
+- **Phase 4: Coverage Hardening (`>= 95%`), SemVer `1.5.0` & Doc Sync (`#45`)**:
+  - Expanded unit coverage in `tests/unit/test_structured_mapper.py`, `tests/unit/test_export.py`, `tests/unit/test_ingest.py`, and `tests/unit/test_query.py` covering `src/knowledgereduce/map/structured.py` (`99%`), `src/knowledgereduce/export/sharded.py` (`100%`), `src/knowledgereduce/export/graph_formats.py` (`100%`), `src/knowledgereduce/ingest/base.py` (`97%`), and `src/knowledgereduce/query/analytics.py` (`100%`), lifting total coverage to `95.70%` (`135 passed`) and raising `Makefile` `test` gate to `--cov-fail-under=95`.
+  - Bumped SemVer to `1.5.0` across `pyproject.toml`, `src/knowledgereduce/__init__.py`, `tests/unit/test_smoke.py`, and `uv.lock`, and synced `README.md`, `docs/conflicts_and_benchmarks.md`, `lessons_learned.md`, `CHANGELOG.md`, and `docs/plans/`.
 
 ## [1.4.0] - 2026-11-24
 

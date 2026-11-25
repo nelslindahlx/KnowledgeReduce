@@ -161,3 +161,41 @@ def test_json_export_error_paths_and_compat_loader(tmp_path: Path) -> None:
     promoted = node_link_graph_compat(links_digraph_payload)
     assert isinstance(promoted, nx.MultiDiGraph)
     assert promoted.has_edge("a", "b")
+
+
+def test_sharded_and_graph_format_edge_and_error_paths(tmp_path: Path) -> None:
+    from knowledgereduce.export.graph_formats import _sanitize_attr_value
+
+    class _CustomObj:
+        def __str__(self) -> str:
+            return "custom-repr"
+
+    layer_data = _make_many_nodes_layer(2)
+    assert _sanitize_attr_value(ReliabilityRating.VERIFIED) == "VERIFIED"
+    assert isinstance(_sanitize_attr_value(layer_data.layer.created_at), str)
+    assert _sanitize_attr_value(_CustomObj()) == "custom-repr"
+
+    shard_dir = export_layer_sharded(layer_data, tmp_path / "sharded", shard_size=1)
+    with pytest.raises(StorageError, match="already exists"):
+        export_layer_sharded(layer_data, shard_dir, shard_size=1, overwrite=False)
+
+    # Overwrite=True replaces existing export cleanly
+    export_layer_sharded(layer_data, shard_dir, shard_size=2, overwrite=True)
+
+    # Missing shard referenced in manifest raises StorageError
+    (shard_dir / "claims_00001.jsonl").unlink()
+    with pytest.raises(StorageError, match="Missing shard file"):
+        import_layer_sharded(shard_dir)
+
+    # Unsupported schema_version raises StorageError
+    manifest_path = shard_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "99.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(StorageError, match="Unsupported sharded schema_version"):
+        import_layer_sharded(shard_dir)
+
+    # Missing manifest.json raises StorageError
+    manifest_path.unlink()
+    with pytest.raises(StorageError, match=r"manifest\.json not found"):
+        import_layer_sharded(shard_dir)

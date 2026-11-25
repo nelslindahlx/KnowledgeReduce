@@ -16,7 +16,7 @@ help:
 	@echo "  make lint       - Run ruff check and ruff format --check"
 	@echo "  make typecheck  - Run strict mypy across src/"
 	@echo "  make smoke-pr   - Run canary + lint + typecheck + unit & golden tests"
-	@echo "  make test       - Run full pytest suite with 85% coverage gate"
+	@echo "  make test       - Run full pytest suite with 95% coverage gate"
 	@echo "  make examples   - Run all offline scripts under examples/"
 	@echo "  make notebooks  - Validate zero committed outputs and execute notebooks/"
 	@echo "  make golden     - Run Civic Honors book and multi-source stack golden benchmarks"
@@ -43,7 +43,7 @@ smoke-pr: canary lint typecheck
 	$(PYTHON) -m pytest tests/unit/ tests/golden/ -q
 
 test:
-	$(PYTHON) -m pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=85
+	$(PYTHON) -m pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=95
 
 examples:
 	@for script in examples/*.py; do \

@@ -14,8 +14,8 @@ KnowledgeReduce unifies the conceptual architecture from [*KnowledgeReduce: Buil
 1. **Ingest (`knowledgereduce.ingest`):** SSRF-hardened async web crawler (`httpx`, private-IP blocking, `http`/`https`-only, cached `robots.txt` with timeouts, per-domain rate limiting, lazy warning-free `trafilatura` main-content extraction, `content_sha256` change tracking) plus offline local `CSV`, `JSON`/`JSONL`, `Markdown`, `HTML`, and plain-text connectors (`HTMLConnector`) and SHA-256 incremental delta ingestion (`incremental_from_layer`).
 2. **Map (`knowledgereduce.map`):** Stateless, parallelizable document mappers (`DeterministicNLPMapper`, schema-inferred `StructuredMapper` with per-row typing & sparse JSON support, optional batched `SpacyNLPMapper`) plus resumable `02_mapped.jsonl` checkpoints and an agent-in-the-loop MCP hook (`submit_mapped_batch`). Every `Claim` connects to its extracted `Entity` nodes via `MENTIONS` and semantic `Relation` edges.
 3. **Resolve (`knowledgereduce.resolve`):** Sub-quadratic 3-tier deduplication (SHA-256 exact hash → token-blocked `rapidfuzz` → batched L2-normalized embeddings + `AgglomerativeClustering(metric="precomputed")`) with precomputed `O(N)` claim merge features, Union-Find entity disambiguation, and atomic `entity_id_map` endpoint remapping.
-4. **Reduce (`knowledgereduce.reduce`):** Representative-preserving cluster merging (never destructive deletion), full provenance/alias/tag union, **`PreserveDispute`** default conflict handling (`CONTRADICTS` edges + structured `ConflictRecord`s with `needs_review=True`, including single-year temporal conflict detection), shared `adjudicate_conflict`, and a strict `IntegrityValidator` gate guaranteeing zero dangling edges.
-5. **Store, Stack & Serve (`storage`, `stack`, `query`, `export`, `mcp`):** Immutable columnar Parquet layers (plus pre-warmed `FixedSizeListArray` `claim_embeddings.parquet` vector index and `(mtime_ns, size)` memory caching) queried via parameterized DuckDB SQL and bounded k-hop subgraphs, non-destructive `StackManager` set/overlay algebra (`overlay`, `union`, `intersection`, `difference`, optional `reconcile=True`, `diff_layers`) in a lineage DAG, Hybrid GraphRAG retrieval (`HashingEmbeddingProvider` default), Markdown Knowledge Brief + lossless sharded JSONL + sanitized GraphML/GEXF exports, Typer CLI (`kr`), and a 14-tool Antigravity-ready `stdio` MCP server.
+4. **Reduce (`knowledgereduce.reduce`):** Representative-preserving cluster merging (never destructive deletion), structural grounding-weighted `quality_score`, full provenance/alias/tag union, **`PreserveDispute`** default conflict handling (`CONTRADICTS` edges + structured `ConflictRecord`s with `needs_review=True`, including single-year temporal conflict detection), shared `adjudicate_conflict`, and a strict `IntegrityValidator` gate guaranteeing zero dangling edges.
+5. **Store, Stack & Serve (`storage`, `stack`, `query`, `export`, `mcp`):** Immutable columnar Parquet layers (plus pre-warmed `FixedSizeListArray` `claim_embeddings.parquet` vector index, `(mtime_ns, size)` summary/graph caches, and thread-safe persistent DuckDB read session for sub-15 ms warm GraphRAG), non-destructive `StackManager` set/overlay algebra (`overlay`, `union`, `intersection`, `difference`, optional `reconcile=True`, `diff_layers`) in a lineage DAG, Hybrid GraphRAG retrieval (`HashingEmbeddingProvider` default), Markdown Knowledge Brief + lossless sharded JSONL + sanitized GraphML/GEXF exports, Typer CLI (`kr`), and a 14-tool Antigravity-ready `stdio` MCP server.
 
 ---
 
@@ -40,7 +40,7 @@ Verify the installation:
 
 ```bash
 uv run kr version
-# knowledgereduce 1.4.0
+# knowledgereduce 1.5.0
 ```
 
 ---
@@ -152,8 +152,8 @@ All changes to `main` follow the zero-GitHub-Actions-minutes **Maker / Checker P
 ```bash
 make canary      # <10s: import warning gate + tests/meta/ invariants & doc parity
 make smoke-pr    # canary + ruff + mypy + unit & golden tests
-make local-ci    # complete local CI gate (canary + lint + mypy + >=85% cov + examples + notebooks + 1K benchmark)
-make golden      # Civic Honors book strict regression benchmark
+make local-ci    # complete local CI gate (canary + lint + mypy + >=95% cov + examples + notebooks + 1K benchmark)
+make golden      # Civic Honors book + offline multi-source stack strict regression benchmarks
 make benchmark   # 50-doc golden eval + 1K scaling harness
 uv run --no-sync python benchmarks/run_benchmark.py --scale 1000 10000
 ```
