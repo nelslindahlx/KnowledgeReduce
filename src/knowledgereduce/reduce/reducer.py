@@ -133,6 +133,81 @@ def _merge_claim_cluster(
     return merged_claim, id_map
 
 
+merge_claim_cluster = _merge_claim_cluster
+
+
+def deduplicate_and_merge_claims(
+    claims: Sequence[Claim],
+    relations: Sequence[Relation],
+    source_trust: dict[str, float],
+    *,
+    lexical_threshold: float = 0.88,
+    semantic_threshold: float = 0.84,
+    min_length: int = 20,
+    embedding_provider: EmbeddingProvider | None = None,
+    functional_predicates: frozenset[str] | None = None,
+) -> tuple[list[Claim], dict[str, str], list[Claim]]:
+    """Cluster duplicate claims and merge each cluster while preserving provenance."""
+    degree_map: dict[str, int] = defaultdict(int)
+    for rel in relations:
+        degree_map[rel.source_id] += 1
+        degree_map[rel.target_id] += 1
+    max_degree = max(degree_map.values(), default=1)
+
+    clusters, dropped_short = cluster_claims(
+        claims,
+        lexical_threshold=lexical_threshold,
+        semantic_threshold=semantic_threshold,
+        min_length=min_length,
+        embedding_provider=embedding_provider,
+        functional_predicates=functional_predicates,
+    )
+    reduced_claims: list[Claim] = []
+    claim_id_map: dict[str, str] = {}
+    for cluster in clusters:
+        canonical_claim, local_map = merge_claim_cluster(
+            cluster, source_trust, degree_map, max_degree
+        )
+        reduced_claims.append(canonical_claim)
+        claim_id_map.update(local_map)
+    return reduced_claims, claim_id_map, dropped_short
+
+
+def deduplicate_relations(
+    relations: Sequence[Relation],
+    surviving_nodes: set[str],
+    *,
+    claim_id_map: dict[str, str] | None = None,
+) -> list[Relation]:
+    """Remap claim endpoints, drop self-loops/dangling edges, and merge parallel triples."""
+    dedup_rels: dict[tuple[str, str, str], Relation] = {}
+    for rel in relations:
+        new_src = claim_id_map.get(rel.source_id, rel.source_id) if claim_id_map else rel.source_id
+        new_dst = claim_id_map.get(rel.target_id, rel.target_id) if claim_id_map else rel.target_id
+        if new_src == new_dst:
+            continue
+        if new_src not in surviving_nodes or new_dst not in surviving_nodes:
+            continue
+
+        triple_key = (new_src, new_dst, rel.relation_type)
+        if triple_key in dedup_rels:
+            existing = dedup_rels[triple_key]
+            dedup_rels[triple_key] = existing.model_copy(
+                update={
+                    "confidence": max(existing.confidence, rel.confidence),
+                    "weight": max(existing.weight, rel.weight),
+                    "evidence": _dedup_evidence([*existing.evidence, *rel.evidence]),
+                }
+            )
+        else:
+            dedup_rels[triple_key] = (
+                rel.model_copy(update={"source_id": new_src, "target_id": new_dst})
+                if new_src != rel.source_id or new_dst != rel.target_id
+                else rel
+            )
+    return list(dedup_rels.values())
+
+
 class KnowledgeReducer:
     """Reduces mapped batches into a deduplicated, conflict-aware ``LayerData``."""
 
@@ -177,30 +252,16 @@ class KnowledgeReducer:
         )
         source_trust = {s.source_id: s.trust_weight for s in sources}
 
-        # Compute pre-cluster incident relation counts for claim importance ranking.
-        degree_map: dict[str, int] = defaultdict(int)
-        for rel in remapped_relations:
-            degree_map[rel.source_id] += 1
-            degree_map[rel.target_id] += 1
-        max_degree = max(degree_map.values(), default=1)
-
-        clusters, dropped_short = cluster_claims(
+        reduced_claims, claim_id_map, dropped_short = deduplicate_and_merge_claims(
             remapped_claims,
+            remapped_relations,
+            source_trust,
             lexical_threshold=self.lexical_threshold,
             semantic_threshold=self.semantic_threshold,
             min_length=self.min_claim_length,
             embedding_provider=self.embedding_provider,
             functional_predicates=self.single_valued_predicates,
         )
-
-        reduced_claims: list[Claim] = []
-        claim_id_map: dict[str, str] = {}
-        for cluster in clusters:
-            canonical_claim, local_map = _merge_claim_cluster(
-                cluster, source_trust, degree_map, max_degree
-            )
-            reduced_claims.append(canonical_claim)
-            claim_id_map.update(local_map)
 
         # Resolve conflicts (PreserveDispute keeps competing claims + adds CONTRADICTS edges).
         final_claims, contradiction_rels, conflicts = resolve_claim_conflicts(
@@ -213,31 +274,11 @@ class KnowledgeReducer:
         surviving_nodes = {e.entity_id for e in entities} | {c.claim_id for c in final_claims}
 
         # Rewrite relation endpoints via claim_id_map and deduplicate parallel identical triples.
-        dedup_rels: dict[tuple[str, str, str], Relation] = {}
-        for rel in [*remapped_relations, *contradiction_rels]:
-            new_src = claim_id_map.get(rel.source_id, rel.source_id)
-            new_dst = claim_id_map.get(rel.target_id, rel.target_id)
-            if new_src == new_dst:
-                continue
-            if new_src not in surviving_nodes or new_dst not in surviving_nodes:
-                continue
-
-            triple_key = (new_src, new_dst, rel.relation_type)
-            if triple_key in dedup_rels:
-                existing = dedup_rels[triple_key]
-                dedup_rels[triple_key] = existing.model_copy(
-                    update={
-                        "confidence": max(existing.confidence, rel.confidence),
-                        "weight": max(existing.weight, rel.weight),
-                        "evidence": _dedup_evidence([*existing.evidence, *rel.evidence]),
-                    }
-                )
-            else:
-                dedup_rels[triple_key] = rel.model_copy(
-                    update={"source_id": new_src, "target_id": new_dst}
-                )
-
-        final_relations = list(dedup_rels.values())
+        final_relations = deduplicate_relations(
+            [*remapped_relations, *contradiction_rels],
+            surviving_nodes,
+            claim_id_map=claim_id_map,
+        )
 
         compression_ratio = (
             round(1.0 - (len(final_claims) / raw_claims_count), 4) if raw_claims_count > 0 else 0.0

@@ -6,6 +6,7 @@ import pytest
 
 from knowledgereduce.models import (
     Claim,
+    ConflictRecord,
     ConflictStrategy,
     Entity,
     Evidence,
@@ -283,3 +284,128 @@ def test_stack_reconcile_merges_distinct_entity_ids_and_detects_conflicts() -> N
     assert any(r.relation_type == "CONTRADICTS" for r in reconciled.relations)
     valid_eids = {e.entity_id for e in reconciled.entities}
     assert all(c.subject_id in valid_eids for c in reconciled.claims)
+
+
+def test_stack_reconcile_deduplicates_distinct_claim_ids_and_opt_out() -> None:
+    store = MemoryGraphStore()
+    layer_a = LayerData(
+        layer=KnowledgeLayer(layer_id="stk-a", name="Stack A", tier=LayerTier.REDUCED),
+        sources=[SourceDocument(source_id="src_a", uri="https://a.example", trust_weight=0.9)],
+        entities=[
+            Entity(
+                entity_id="ent_a_nels",
+                canonical_name="Nels Lindahl",
+                entity_type="PERSON",
+                evidence=[Evidence(source_id="src_a", excerpt="Nels Lindahl")],
+            ),
+            Entity(
+                entity_id="ent_a_ch",
+                canonical_name="Civic Honors",
+                entity_type="ORG",
+                evidence=[Evidence(source_id="src_a", excerpt="Civic Honors")],
+            ),
+        ],
+        claims=[
+            Claim(
+                claim_id="clm_a_founded",
+                statement="Nels Lindahl founded Civic Honors in 2006 for students.",
+                tags=["origin"],
+                source_id="src_a",
+                reliability=ReliabilityRating.VERIFIED,
+                evidence=[Evidence(source_id="src_a", excerpt="founded Civic Honors in 2006")],
+            )
+        ],
+        relations=[
+            Relation(
+                relation_id="rel_a_1",
+                source_id="clm_a_founded",
+                target_id="ent_a_nels",
+                relation_type="MENTIONS",
+            ),
+            Relation(
+                relation_id="rel_a_2",
+                source_id="clm_a_founded",
+                target_id="ent_a_ch",
+                relation_type="MENTIONS",
+            ),
+        ],
+    )
+    layer_b = LayerData(
+        layer=KnowledgeLayer(layer_id="stk-b", name="Stack B", tier=LayerTier.REDUCED),
+        sources=[SourceDocument(source_id="src_b", uri="https://b.example", trust_weight=0.8)],
+        entities=[
+            Entity(
+                entity_id="ent_b_nels",
+                canonical_name="Dr. Nels Lindahl",
+                entity_type="PERSON",
+                evidence=[Evidence(source_id="src_b", excerpt="Dr. Nels Lindahl")],
+            ),
+            Entity(
+                entity_id="ent_b_ch",
+                canonical_name="Civic Honors",
+                entity_type="ORG",
+                evidence=[Evidence(source_id="src_b", excerpt="Civic Honors")],
+            ),
+        ],
+        claims=[
+            Claim(
+                claim_id="clm_b_founded",
+                statement="Nels Lindahl founded Civic Honors in 2006 for student leaders.",
+                tags=["archive"],
+                source_id="src_b",
+                reliability=ReliabilityRating.LIKELY_TRUE,
+                evidence=[Evidence(source_id="src_b", excerpt="student leaders")],
+            )
+        ],
+        relations=[
+            Relation(
+                relation_id="rel_b_1",
+                source_id="clm_b_founded",
+                target_id="ent_b_nels",
+                relation_type="MENTIONS",
+            ),
+            Relation(
+                relation_id="rel_b_2",
+                source_id="clm_b_founded",
+                target_id="ent_b_ch",
+                relation_type="MENTIONS",
+            ),
+        ],
+        conflicts=[
+            ConflictRecord(
+                conflict_id="cf_existing",
+                target_type="claim",
+                target_key="clm_b_founded",
+                candidates=[{"value": "2006", "claim_ids": ["clm_b_founded"]}],
+                resolution_strategy=ConflictStrategy.PRESERVE_DISPUTE,
+                winning_value="2006",
+            )
+        ],
+    )
+    store.save_layer(layer_a)
+    store.save_layer(layer_b)
+    mgr = StackManager(store)
+
+    deduped = mgr.merge_layers(
+        ["stk-a", "stk-b"],
+        target_layer_id="stk-dedup",
+        mode=MergeMode.UNION,
+        reconcile=True,
+        deduplicate_claims=True,
+    )
+    assert len(deduped.claims) == 1
+    surviving_claim = deduped.claims[0]
+    assert set(surviving_claim.tags) == {"origin", "archive"}
+    assert len(surviving_claim.merged_from) == 1
+    assert len(deduped.relations) == 2
+    assert all(r.source_id == surviving_claim.claim_id for r in deduped.relations)
+    assert deduped.conflicts[0].candidates[0]["claim_ids"] == [surviving_claim.claim_id]
+
+    no_dedup = mgr.merge_layers(
+        ["stk-a", "stk-b"],
+        target_layer_id="stk-nodedup",
+        mode=MergeMode.UNION,
+        reconcile=True,
+        deduplicate_claims=False,
+    )
+    assert len(no_dedup.claims) == 2

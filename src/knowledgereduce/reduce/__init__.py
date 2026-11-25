@@ -6,7 +6,12 @@ from knowledgereduce.reduce.conflicts import (
     is_functional_predicate,
     resolve_claim_conflicts,
 )
-from knowledgereduce.reduce.reducer import KnowledgeReducer
+from knowledgereduce.reduce.reducer import (
+    KnowledgeReducer,
+    deduplicate_and_merge_claims,
+    deduplicate_relations,
+    merge_claim_cluster,
+)
 from knowledgereduce.reduce.validator import IntegrityValidator
 
 __all__ = [
@@ -14,6 +19,9 @@ __all__ = [
     "IntegrityValidator",
     "KnowledgeReducer",
     "adjudicate_conflict",
+    "deduplicate_and_merge_claims",
+    "deduplicate_relations",
     "is_functional_predicate",
+    "merge_claim_cluster",
     "resolve_claim_conflicts",
 ]

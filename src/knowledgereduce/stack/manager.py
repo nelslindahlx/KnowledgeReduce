@@ -21,7 +21,12 @@ from knowledgereduce.models import (
     StackError,
     utc_now,
 )
-from knowledgereduce.reduce import IntegrityValidator, resolve_claim_conflicts
+from knowledgereduce.reduce import (
+    IntegrityValidator,
+    deduplicate_and_merge_claims,
+    deduplicate_relations,
+    resolve_claim_conflicts,
+)
 from knowledgereduce.resolve import resolve_entities_and_remap
 from knowledgereduce.storage.base import GraphStore, compute_layer_diff
 
@@ -240,7 +245,10 @@ class StackManager:
         tier: LayerTier = LayerTier.STACKED,
         conflict_strategy: ConflictStrategy = ConflictStrategy.PRESERVE_DISPUTE,
         reconcile: bool = False,
+        deduplicate_claims: bool = True,
         lexical_threshold: float = 0.88,
+        semantic_threshold: float = 0.84,
+        min_claim_length: int = 0,
         overwrite: bool = False,
     ) -> LayerData:
         """Compose *overlay_layer_id* on top of *base_layer_id* non-destructively."""
@@ -252,7 +260,10 @@ class StackManager:
             tier=tier,
             conflict_strategy=conflict_strategy,
             reconcile=reconcile,
+            deduplicate_claims=deduplicate_claims,
             lexical_threshold=lexical_threshold,
+            semantic_threshold=semantic_threshold,
+            min_claim_length=min_claim_length,
             overwrite=overwrite,
         )
 
@@ -266,7 +277,10 @@ class StackManager:
         tier: LayerTier = LayerTier.STACKED,
         conflict_strategy: ConflictStrategy = ConflictStrategy.PRESERVE_DISPUTE,
         reconcile: bool = False,
+        deduplicate_claims: bool = True,
         lexical_threshold: float = 0.88,
+        semantic_threshold: float = 0.84,
+        min_claim_length: int = 0,
         overwrite: bool = False,
     ) -> LayerData:
         """Combine multiple immutable layers using *mode* without mutating inputs."""
@@ -432,8 +446,20 @@ class StackManager:
                 )
             )
             source_trust = {s.source_id: s.trust_weight for s in sources.values()}
+            claim_id_map: dict[str, str] = {}
+            claims_for_conflicts = remapped_claims
+            if deduplicate_claims and len(remapped_claims) > 1:
+                claims_for_conflicts, claim_id_map, _dropped = deduplicate_and_merge_claims(
+                    remapped_claims,
+                    remapped_rels,
+                    source_trust,
+                    lexical_threshold=lexical_threshold,
+                    semantic_threshold=semantic_threshold,
+                    min_length=min_claim_length,
+                )
+
             final_claims, contra_rels, new_conflicts = resolve_claim_conflicts(
-                remapped_claims,
+                claims_for_conflicts,
                 source_trust,
                 strategy=conflict_strategy,
             )
@@ -441,25 +467,30 @@ class StackManager:
             claims = {c.claim_id: c for c in final_claims}
             rec_nodes = set(entities.keys()) | set(claims.keys())
 
-            dedup_rels: dict[tuple[str, str, str], Relation] = {}
-            for rel in [*remapped_rels, *contra_rels]:
-                if rel.source_id == rel.target_id:
-                    continue
-                if rel.source_id not in rec_nodes or rel.target_id not in rec_nodes:
-                    continue
-                triple_key = (rel.source_id, rel.target_id, rel.relation_type)
-                if triple_key in dedup_rels:
-                    existing = dedup_rels[triple_key]
-                    dedup_rels[triple_key] = existing.model_copy(
-                        update={
-                            "confidence": max(existing.confidence, rel.confidence),
-                            "weight": max(existing.weight, rel.weight),
-                            "evidence": _dedup_evidence([*existing.evidence, *rel.evidence]),
-                        }
-                    )
-                else:
-                    dedup_rels[triple_key] = rel
-            valid_relations = list(dedup_rels.values())
+            valid_relations = deduplicate_relations(
+                [*remapped_rels, *contra_rels],
+                rec_nodes,
+                claim_id_map=claim_id_map,
+            )
+
+            if claim_id_map:
+                for cid_key, existing_cf in list(conflicts.items()):
+                    updated_cands = []
+                    changed = False
+                    for cand in existing_cf.candidates:
+                        cids = cand.get("claim_ids")
+                        if isinstance(cids, list):
+                            remapped_cids = list(
+                                dict.fromkeys(claim_id_map.get(str(x), str(x)) for x in cids)
+                            )
+                            if remapped_cids != cids:
+                                cand = {**cand, "claim_ids": remapped_cids}
+                                changed = True
+                        updated_cands.append(cand)
+                    if changed:
+                        conflicts[cid_key] = existing_cf.model_copy(
+                            update={"candidates": updated_cands}
+                        )
 
             for cf in new_conflicts:
                 if cf.conflict_id not in conflicts or conflicts[cf.conflict_id].needs_review:

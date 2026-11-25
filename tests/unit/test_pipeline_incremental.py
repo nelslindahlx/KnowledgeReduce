@@ -240,3 +240,80 @@ build_embeddings_index: false
     parsed = PipelineConfig.from_yaml(yaml_path)
     assert parsed.incremental_from_layer == "base-v1"
     assert parsed.build_embeddings_index is False
+
+
+def test_pipeline_parallel_worker_config_parity_and_store_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from knowledgereduce.map.structured import StructuredMappingConfig
+
+    doc_one = tmp_path / "doc1.md"
+    doc_two = tmp_path / "doc2.md"
+    doc_one.write_text(
+        "Chapter Overview\nWhat makes community engagement succeed?\n"
+        "Nels Lindahl founded Civic Honors in 2006 to inspire civic participation.\n",
+        encoding="utf-8",
+    )
+    doc_two.write_text(
+        "Program Origins\nWhy did the program expand in Kansas?\n"
+        "The University of Kansas hosted early student seminars on civil society.\n",
+        encoding="utf-8",
+    )
+
+    csv_a = tmp_path / "people_a.csv"
+    csv_b = tmp_path / "people_b.csv"
+    csv_a.write_text("name,role\nNels Lindahl,Founder\n", encoding="utf-8")
+    csv_b.write_text("name,role\nCharles Carlsen,Advisor\n", encoding="utf-8")
+
+    # Verify max_workers=2 matches max_workers=1 for skip_headings/skip_questions and structured_config.
+    files = [
+        LocalFileSourceConfig(path=str(doc_one), source_id="d1"),
+        LocalFileSourceConfig(path=str(doc_two), source_id="d2"),
+        LocalFileSourceConfig(path=str(csv_a), source_id="c1"),
+        LocalFileSourceConfig(path=str(csv_b), source_id="c2"),
+    ]
+    base_cfg = PipelineConfig(
+        layer_id="par-1",
+        layer_name="Parallel 1",
+        store_dir=str(tmp_path / "par_store"),
+        local_files=files,
+        skip_headings=False,
+        skip_questions=False,
+        min_sentence_length=15,
+        min_claim_length=15,
+        structured_config=StructuredMappingConfig(statement_template="{name} serves as {role}."),
+        max_workers=1,
+    )
+    runner_1 = PipelineRunner()
+    docs = runner_1.ingest(base_cfg)
+    b1 = runner_1.map_documents(docs, base_cfg)
+    b2 = runner_1.map_documents(docs, base_cfg.model_copy(update={"max_workers": 2}))
+
+    assert [c.statement for b in b1 for c in b.claims] == [
+        c.statement for b in b2 for c in b.claims
+    ]
+    all_stmts = [c.statement for b in b2 for c in b.claims]
+    assert any("Chapter Overview" in s for s in all_stmts)
+    assert any("What makes community engagement succeed?" in s for s in all_stmts)
+    assert any("Nels Lindahl serves as Founder." in s for s in all_stmts)
+
+    # Verify internal stores opened by PipelineRunner are closed cleanly after run().
+    closed_stores: list[str] = []
+    real_close = DuckDBParquetStore.close
+
+    def _spy_close(self_store: DuckDBParquetStore) -> None:
+        closed_stores.append(str(self_store.root_dir))
+        real_close(self_store)
+
+    monkeypatch.setattr(DuckDBParquetStore, "close", _spy_close)
+    PipelineRunner().run(base_cfg)
+    assert len(closed_stores) >= 1
+
+    # Explicit store supplied by caller must NOT be closed automatically by PipelineRunner.
+    explicit = DuckDBParquetStore(tmp_path / "explicit_store")
+    before = len(closed_stores)
+    PipelineRunner(store=explicit).run(
+        base_cfg.model_copy(update={"layer_id": "par-exp", "incremental_from_layer": None})
+    )
+    assert len(closed_stores) == before
+    explicit.close()
