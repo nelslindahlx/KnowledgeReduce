@@ -6,11 +6,12 @@ import contextlib
 import hashlib
 import json
 import shutil
+import tempfile
 import threading
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import duckdb
 import networkx as nx
@@ -39,9 +40,17 @@ from knowledgereduce.storage.base import (
     ClaimSummary,
     filter_matching_conflicts,
     layer_data_to_networkx,
+    normalize_query_datetime,
     rank_claim_summaries,
     tokenize_search_query,
 )
+
+_CLAIM_SORT_COLUMNS: dict[str, str] = {
+    "quality_score": "quality_score",
+    "reliability": "reliability",
+    "confidence": "confidence",
+    "updated_at": "TRY_CAST(updated_at AS TIMESTAMPTZ)",
+}
 
 _CLAIM_SUMMARY_COLUMNS = [
     "claim_id",
@@ -273,6 +282,7 @@ class DuckDBParquetStore:
         self.layers_dir.mkdir(parents=True, exist_ok=True)
         self._graph_cache_max_rows = graph_cache_max_rows
         self._con_lock = threading.RLock()
+        self._write_lock = threading.RLock()
         self._read_con: duckdb.DuckDBPyConnection | None = None
         self._embedding_cache: dict[
             tuple[str, str], tuple[int, int, tuple[str, ...], NDArray[np.float32]]
@@ -371,152 +381,189 @@ class DuckDBParquetStore:
             return False
         return (layer_dir / "manifest.json").is_file()
 
-    def save_layer(self, layer_data: LayerData, *, overwrite: bool = False) -> KnowledgeLayer:
-        layer_id = layer_data.layer.layer_id
-        target_dir = self._layer_path(layer_id)
-        if target_dir.exists() and not overwrite:
-            raise StorageError(
-                f"Layer {layer_id!r} already exists at {target_dir} (pass overwrite=True)."
-            )
-
-        staging_dir = self.layers_dir / f".staging_{layer_id}"
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-        staging_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            source_rows = [
-                {
-                    "source_id": s.source_id,
-                    "uri": s.uri,
-                    "source_type": str(s.source_type),
-                    "title": s.title,
-                    "author": s.author,
-                    "published_at": s.published_at.isoformat() if s.published_at else None,
-                    "fetched_at": s.fetched_at.isoformat(),
-                    "content": s.content,
-                    "content_sha256": s.content_sha256,
-                    "trust_weight": s.trust_weight,
-                    "metadata_json": json.dumps(s.metadata),
-                }
-                for s in layer_data.sources
-            ]
-            entity_rows = [
-                {
-                    "entity_id": e.entity_id,
-                    "canonical_name": e.canonical_name,
-                    "entity_type": e.entity_type,
-                    "aliases_json": json.dumps(e.aliases),
-                    "attributes_json": json.dumps(e.attributes),
-                    "evidence_json": json.dumps([ev.model_dump(mode="json") for ev in e.evidence]),
-                    "external_ids_json": json.dumps(e.external_ids),
-                }
-                for e in layer_data.entities
-            ]
-            claim_rows = [
-                {
-                    "claim_id": c.claim_id,
-                    "statement": c.statement,
-                    "category": c.category,
-                    "tags_json": json.dumps(c.tags),
-                    "contextual_notes": c.contextual_notes,
-                    "recorded_at": c.recorded_at.isoformat(),
-                    "updated_at": c.updated_at.isoformat(),
-                    "published_at": c.published_at.isoformat() if c.published_at else None,
-                    "reliability": int(c.reliability),
-                    "source_id": c.source_id,
-                    "source_title": c.source_title,
-                    "author_creator": c.author_creator,
-                    "url_reference": c.url_reference,
-                    "access_level": c.access_level,
-                    "usage_count": c.usage_count,
-                    "related_facts_json": json.dumps(c.related_facts),
-                    "confidence": c.confidence,
-                    "quality_score": c.quality_score,
-                    "subject_id": c.subject_id,
-                    "predicate": c.predicate,
-                    "object_id": c.object_id,
-                    "object_literal": c.object_literal,
-                    "evidence_json": json.dumps([ev.model_dump(mode="json") for ev in c.evidence]),
-                    "merged_from_json": json.dumps(c.merged_from),
-                    "needs_review": c.needs_review,
-                }
-                for c in layer_data.claims
-            ]
-            relation_rows = [
-                {
-                    "relation_id": r.relation_id,
-                    "source_id": r.source_id,
-                    "target_id": r.target_id,
-                    "relation_type": r.relation_type,
-                    "confidence": r.confidence,
-                    "weight": r.weight,
-                    "evidence_json": json.dumps([ev.model_dump(mode="json") for ev in r.evidence]),
-                    "attributes_json": json.dumps(r.attributes),
-                }
-                for r in layer_data.relations
-            ]
-            conflict_rows = [
-                {
-                    "conflict_id": cf.conflict_id,
-                    "target_type": cf.target_type,
-                    "target_key": cf.target_key,
-                    "candidates_json": json.dumps(cf.candidates, default=str),
-                    "resolution_strategy": str(cf.resolution_strategy),
-                    "winning_value_json": json.dumps(cf.winning_value, default=str),
-                    "winning_source_id": cf.winning_source_id,
-                    "resolved_at": cf.resolved_at.isoformat(),
-                    "needs_review": cf.needs_review,
-                    "resolution_notes": cf.resolution_notes,
-                }
-                for cf in layer_data.conflicts
-            ]
-
-            files_meta = {
-                "sources.parquet": _write_table(
-                    source_rows, _SOURCES_SCHEMA, staging_dir / "sources.parquet"
-                ),
-                "entities.parquet": _write_table(
-                    entity_rows, _ENTITIES_SCHEMA, staging_dir / "entities.parquet"
-                ),
-                "claims.parquet": _write_table(
-                    claim_rows, _CLAIMS_SCHEMA, staging_dir / "claims.parquet"
-                ),
-                "relations.parquet": _write_table(
-                    relation_rows, _RELATIONS_SCHEMA, staging_dir / "relations.parquet"
-                ),
-                "conflicts.parquet": _write_table(
-                    conflict_rows, _CONFLICTS_SCHEMA, staging_dir / "conflicts.parquet"
-                ),
-            }
-
-            layer_copy = KnowledgeLayer.model_validate(layer_data.layer.model_dump())
-            manifest = {
-                "schema_version": SCHEMA_VERSION,
-                "layer": layer_copy.model_dump(mode="json"),
-                "files": files_meta,
-            }
-            (staging_dir / "manifest.json").write_text(
-                json.dumps(manifest, indent=2), encoding="utf-8"
-            )
-
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            staging_dir.rename(target_dir)
-            self._invalidate_layer_caches(layer_id)
-            return layer_copy
-        except Exception:
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir)
-            raise
-
-    def load_layer(self, layer_id: str) -> LayerData:
+    def get_layer_manifest(self, layer_id: str) -> KnowledgeLayer:
         layer_dir = self._layer_path(layer_id)
         manifest_path = layer_dir / "manifest.json"
         if not manifest_path.is_file():
             raise StorageError(f"Layer {layer_id!r} not found.")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        layer = KnowledgeLayer.model_validate(manifest["layer"])
+        return KnowledgeLayer.model_validate(manifest["layer"])
+
+    def list_source_hashes(self, layer_id: str) -> tuple[dict[str, str], dict[str, str]]:
+        sources_pq = self._parquet_path(layer_id, "sources")
+        table = pq.read_table(sources_pq, columns=["source_id", "uri", "content_sha256"])
+        sids = table.column("source_id").to_pylist()
+        uris = table.column("uri").to_pylist()
+        shas = table.column("content_sha256").to_pylist()
+        known_by_uri: dict[str, str] = {}
+        known_by_source_id: dict[str, str] = {}
+        for sid, uri, sha in zip(sids, uris, shas, strict=True):
+            sha_str = str(sha or "")
+            if not sha_str:
+                continue
+            if uri:
+                known_by_uri[str(uri)] = sha_str
+            if sid:
+                known_by_source_id[str(sid)] = sha_str
+        return known_by_uri, known_by_source_id
+
+    def save_layer(self, layer_data: LayerData, *, overwrite: bool = False) -> KnowledgeLayer:
+        layer_id = layer_data.layer.layer_id
+        with self._write_lock:
+            target_dir = self._layer_path(layer_id)
+            if target_dir.exists() and not overwrite:
+                raise StorageError(
+                    f"Layer {layer_id!r} already exists at {target_dir} (pass overwrite=True)."
+                )
+
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=f".staging_{layer_id}_", dir=self.layers_dir)
+            )
+            backup_dir: Path | None = None
+
+            try:
+                source_rows = [
+                    {
+                        "source_id": s.source_id,
+                        "uri": s.uri,
+                        "source_type": str(s.source_type),
+                        "title": s.title,
+                        "author": s.author,
+                        "published_at": s.published_at.isoformat() if s.published_at else None,
+                        "fetched_at": s.fetched_at.isoformat(),
+                        "content": s.content,
+                        "content_sha256": s.content_sha256,
+                        "trust_weight": s.trust_weight,
+                        "metadata_json": json.dumps(s.metadata),
+                    }
+                    for s in layer_data.sources
+                ]
+                entity_rows = [
+                    {
+                        "entity_id": e.entity_id,
+                        "canonical_name": e.canonical_name,
+                        "entity_type": e.entity_type,
+                        "aliases_json": json.dumps(e.aliases),
+                        "attributes_json": json.dumps(e.attributes),
+                        "evidence_json": json.dumps(
+                            [ev.model_dump(mode="json") for ev in e.evidence]
+                        ),
+                        "external_ids_json": json.dumps(e.external_ids),
+                    }
+                    for e in layer_data.entities
+                ]
+                claim_rows = [
+                    {
+                        "claim_id": c.claim_id,
+                        "statement": c.statement,
+                        "category": c.category,
+                        "tags_json": json.dumps(c.tags),
+                        "contextual_notes": c.contextual_notes,
+                        "recorded_at": c.recorded_at.isoformat(),
+                        "updated_at": c.updated_at.isoformat(),
+                        "published_at": c.published_at.isoformat() if c.published_at else None,
+                        "reliability": int(c.reliability),
+                        "source_id": c.source_id,
+                        "source_title": c.source_title,
+                        "author_creator": c.author_creator,
+                        "url_reference": c.url_reference,
+                        "access_level": c.access_level,
+                        "usage_count": c.usage_count,
+                        "related_facts_json": json.dumps(c.related_facts),
+                        "confidence": c.confidence,
+                        "quality_score": c.quality_score,
+                        "subject_id": c.subject_id,
+                        "predicate": c.predicate,
+                        "object_id": c.object_id,
+                        "object_literal": c.object_literal,
+                        "evidence_json": json.dumps(
+                            [ev.model_dump(mode="json") for ev in c.evidence]
+                        ),
+                        "merged_from_json": json.dumps(c.merged_from),
+                        "needs_review": c.needs_review,
+                    }
+                    for c in layer_data.claims
+                ]
+                relation_rows = [
+                    {
+                        "relation_id": r.relation_id,
+                        "source_id": r.source_id,
+                        "target_id": r.target_id,
+                        "relation_type": r.relation_type,
+                        "confidence": r.confidence,
+                        "weight": r.weight,
+                        "evidence_json": json.dumps(
+                            [ev.model_dump(mode="json") for ev in r.evidence]
+                        ),
+                        "attributes_json": json.dumps(r.attributes),
+                    }
+                    for r in layer_data.relations
+                ]
+                conflict_rows = [
+                    {
+                        "conflict_id": cf.conflict_id,
+                        "target_type": cf.target_type,
+                        "target_key": cf.target_key,
+                        "candidates_json": json.dumps(cf.candidates, default=str),
+                        "resolution_strategy": str(cf.resolution_strategy),
+                        "winning_value_json": json.dumps(cf.winning_value, default=str),
+                        "winning_source_id": cf.winning_source_id,
+                        "resolved_at": cf.resolved_at.isoformat(),
+                        "needs_review": cf.needs_review,
+                        "resolution_notes": cf.resolution_notes,
+                    }
+                    for cf in layer_data.conflicts
+                ]
+
+                files_meta = {
+                    "sources.parquet": _write_table(
+                        source_rows, _SOURCES_SCHEMA, staging_dir / "sources.parquet"
+                    ),
+                    "entities.parquet": _write_table(
+                        entity_rows, _ENTITIES_SCHEMA, staging_dir / "entities.parquet"
+                    ),
+                    "claims.parquet": _write_table(
+                        claim_rows, _CLAIMS_SCHEMA, staging_dir / "claims.parquet"
+                    ),
+                    "relations.parquet": _write_table(
+                        relation_rows, _RELATIONS_SCHEMA, staging_dir / "relations.parquet"
+                    ),
+                    "conflicts.parquet": _write_table(
+                        conflict_rows, _CONFLICTS_SCHEMA, staging_dir / "conflicts.parquet"
+                    ),
+                }
+
+                layer_copy = KnowledgeLayer.model_validate(layer_data.layer.model_dump())
+                manifest = {
+                    "schema_version": SCHEMA_VERSION,
+                    "layer": layer_copy.model_dump(mode="json"),
+                    "files": files_meta,
+                }
+                (staging_dir / "manifest.json").write_text(
+                    json.dumps(manifest, indent=2), encoding="utf-8"
+                )
+
+                if target_dir.exists():
+                    backup_dir = Path(
+                        tempfile.mkdtemp(prefix=f".backup_{layer_id}_", dir=self.layers_dir)
+                    )
+                    backup_dir.rmdir()
+                    target_dir.rename(backup_dir)
+                staging_dir.rename(target_dir)
+                if backup_dir is not None and backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                self._invalidate_layer_caches(layer_id)
+                return layer_copy
+            except Exception:
+                if not target_dir.exists() and backup_dir is not None and backup_dir.exists():
+                    with contextlib.suppress(Exception):
+                        backup_dir.rename(target_dir)
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+
+    def load_layer(self, layer_id: str) -> LayerData:
+        layer = self.get_layer_manifest(layer_id)
 
         sources_pq = str(self._parquet_path(layer_id, "sources"))
         entities_pq = str(self._parquet_path(layer_id, "entities"))
@@ -601,13 +648,27 @@ class DuckDBParquetStore:
         *,
         category: str | None = None,
         tag: str | None = None,
+        tags_any: Sequence[str] | None = None,
         min_reliability: ReliabilityRating | None = None,
         needs_review: bool | None = None,
         text_query: str | None = None,
+        recorded_after: datetime | None = None,
+        recorded_before: datetime | None = None,
+        published_after: datetime | None = None,
+        published_before: datetime | None = None,
+        subject_id: str | None = None,
+        predicate: str | None = None,
+        source_id: str | None = None,
+        sort_by: Literal["quality_score", "reliability", "confidence", "updated_at"] | None = None,
+        descending: bool = True,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Claim]:
+        if sort_by is not None and sort_by not in _CLAIM_SORT_COLUMNS:
+            raise StorageError(f"Unsupported sort_by field {sort_by!r}.")
         pq_path = str(self._parquet_path(layer_id, "claims"))
+        if limit <= 0 or offset < 0:
+            return []
         clauses: list[str] = []
         params: list[Any] = [pq_path]
 
@@ -617,6 +678,12 @@ class DuckDBParquetStore:
         if tag is not None:
             clauses.append("list_contains(from_json(tags_json, '[\"VARCHAR\"]'), ?)")
             params.append(tag)
+        if tags_any is not None:
+            tag_list = [str(item) for item in tags_any]
+            if not tag_list:
+                return []
+            clauses.append("list_has_any(from_json(tags_json, '[\"VARCHAR\"]'), ?::VARCHAR[])")
+            params.append(tag_list)
         if min_reliability is not None:
             clauses.append("reliability >= ?")
             params.append(int(min_reliability))
@@ -627,10 +694,39 @@ class DuckDBParquetStore:
             like = f"%{text_query.lower()}%"
             clauses.append("(LOWER(statement) LIKE ? OR LOWER(contextual_notes) LIKE ?)")
             params.extend([like, like])
+        if recorded_after is not None:
+            clauses.append("TRY_CAST(recorded_at AS TIMESTAMPTZ) >= CAST(? AS TIMESTAMPTZ)")
+            params.append(normalize_query_datetime(recorded_after).isoformat())
+        if recorded_before is not None:
+            clauses.append("TRY_CAST(recorded_at AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)")
+            params.append(normalize_query_datetime(recorded_before).isoformat())
+        if published_after is not None:
+            clauses.append(
+                "published_at IS NOT NULL AND TRY_CAST(published_at AS TIMESTAMPTZ) >= CAST(? AS TIMESTAMPTZ)"
+            )
+            params.append(normalize_query_datetime(published_after).isoformat())
+        if published_before is not None:
+            clauses.append(
+                "published_at IS NOT NULL AND TRY_CAST(published_at AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)"
+            )
+            params.append(normalize_query_datetime(published_before).isoformat())
+        if subject_id is not None:
+            clauses.append("subject_id = ?")
+            params.append(subject_id)
+        if predicate is not None:
+            clauses.append("predicate = ?")
+            params.append(predicate)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_sql = ""
+        if sort_by is not None:
+            direction = "DESC" if descending else "ASC"
+            order_sql = f"ORDER BY {_CLAIM_SORT_COLUMNS[sort_by]} {direction}, claim_id ASC"
         params.extend([limit, offset])
-        sql = f"SELECT * FROM read_parquet(?) {where_sql} LIMIT ? OFFSET ?"  # noqa: S608
+        sql = f"SELECT * FROM read_parquet(?) {where_sql} {order_sql} LIMIT ? OFFSET ?"  # noqa: S608
         return [_claim_from_row(r) for r in self._query_rows(sql, params)]
 
     def list_relations(
@@ -739,11 +835,12 @@ class DuckDBParquetStore:
                 },
                 schema=emb_schema,
             )
-        staging_emb = layer_dir / ".staging_claim_embeddings.parquet"
-        target_emb = layer_dir / "claim_embeddings.parquet"
-        pq.write_table(table, staging_emb, compression="zstd")
-        staging_emb.replace(target_emb)
-        self._invalidate_embedding_cache(layer_id)
+        with self._write_lock:
+            staging_emb = layer_dir / ".staging_claim_embeddings.parquet"
+            target_emb = layer_dir / "claim_embeddings.parquet"
+            pq.write_table(table, staging_emb, compression="zstd")
+            staging_emb.replace(target_emb)
+            self._invalidate_embedding_cache(layer_id)
 
     def load_claim_embeddings(
         self,

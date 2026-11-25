@@ -405,3 +405,75 @@ def test_claim_summary_projection_and_persistent_duckdb_session(tmp_path: Path) 
 
     assert duck._read_con is None
     assert duck._claim_summary_cache == {}
+
+
+def test_store_metadata_only_manifest_and_source_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from knowledgereduce.pipeline import load_layer_source_hashes
+
+    sample = _make_sample_layer("meta-layer")
+    mem = MemoryGraphStore()
+    mem.save_layer(sample)
+    duck = DuckDBParquetStore(tmp_path)
+    duck.save_layer(sample)
+
+    for backend in (mem, duck):
+        manifest = backend.get_layer_manifest("meta-layer")
+        assert manifest.layer_id == "meta-layer"
+        assert manifest.name == "Civic Honors Sample"
+        by_uri, by_id = backend.list_source_hashes("meta-layer")
+        assert by_uri == {"https://civichonors.com/": sample.sources[0].content_sha256}
+        assert by_id == {"src-civic": sample.sources[0].content_sha256}
+        with pytest.raises(StorageError, match="not found"):
+            backend.get_layer_manifest("missing-layer")
+        with pytest.raises(StorageError, match="not found"):
+            backend.list_source_hashes("missing-layer")
+
+    # Verify load_layer_source_hashes never falls back to full load_layer() on DuckDB.
+    def _boom(_layer_id: str) -> LayerData:
+        raise AssertionError("load_layer should not be called")
+
+    monkeypatch.setattr(duck, "load_layer", _boom)
+    assert load_layer_source_hashes(duck, "meta-layer") == (
+        {"https://civichonors.com/": sample.sources[0].content_sha256},
+        {"src-civic": sample.sources[0].content_sha256},
+    )
+    duck.close()
+
+
+def test_duckdb_save_layer_atomic_overwrite_rollback_and_filter_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sample = _make_sample_layer("atomic-v1")
+    with DuckDBParquetStore(tmp_path) as duck:
+        duck.save_layer(sample)
+        assert duck.list_claims("atomic-v1", limit=0) == []
+        assert duck.list_claims("atomic-v1", tags_any=[]) == []
+        with pytest.raises(StorageError, match="Unsupported sort_by"):
+            duck.list_claims("atomic-v1", sort_by="invalid_col")  # type: ignore[arg-type]
+
+        real_rename = Path.rename
+        rename_calls = 0
+
+        def _failing_staging_rename(self_path: Path, target: Path) -> Path:
+            nonlocal rename_calls
+            if target == duck.layers_dir / "atomic-v1" and self_path.name.startswith(".staging_"):
+                rename_calls += 1
+                raise OSError("Simulated swap failure")
+            return real_rename(self_path, target)
+
+        monkeypatch.setattr(Path, "rename", _failing_staging_rename)
+        modified = sample.model_copy(
+            update={"layer": sample.layer.model_copy(update={"name": "Broken Update"})}
+        )
+        with pytest.raises(OSError, match="Simulated swap failure"):
+            duck.save_layer(modified, overwrite=True)
+
+        assert rename_calls == 1
+        # Original layer was cleanly restored and no .staging_/.backup_ dirs leaked into list_layers.
+        restored = duck.load_layer("atomic-v1")
+        assert restored.layer.name == "Civic Honors Sample"
+        assert [layer.layer_id for layer in duck.list_layers()] == ["atomic-v1"]
+        leftover_tmp = [p for p in duck.layers_dir.iterdir() if p.name.startswith(".staging_")]
+        assert leftover_tmp == []

@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import sys
 import tempfile
 import time
 import tracemalloc
@@ -428,11 +429,24 @@ def evaluate_civichonors_book(
     )
 
 
+def _is_coverage_active() -> bool:
+    """Return True when Python tracing or sys.monitoring coverage instrumentation is active."""
+    if sys.gettrace() is not None:
+        return True
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is not None:
+        cov_id = getattr(monitoring, "COVERAGE_ID", None)
+        if cov_id is not None and monitoring.get_tool(cov_id) is not None:
+            return True
+    return False
+
+
 def compare_against_baseline(
     current: BookGoldenMetrics,
     baseline: dict[str, Any],
     *,
     enforce_default_floors: bool = True,
+    timing_multiplier: float | None = None,
 ) -> dict[str, Any]:
     """Compare *current* metrics against a locked baseline snapshot and regression floors."""
     cur_dict = current.to_dict()
@@ -486,13 +500,19 @@ def compare_against_baseline(
         if cur_num < float(min_val):
             floor_failures.append(f"{metric_name}={cur_num} < min floor {min_val}")
 
+    mult = (
+        timing_multiplier
+        if timing_multiplier is not None
+        else (3.0 if _is_coverage_active() else 1.0)
+    )
     for metric_name, max_val in max_floors.items():
         if metric_name not in cur_dict:
             floor_failures.append(f"Missing metric {metric_name!r} for max floor check.")
             continue
         cur_num = float(cur_dict[metric_name])
-        if cur_num > float(max_val):
-            floor_failures.append(f"{metric_name}={cur_num} > max ceiling {max_val}")
+        effective_max = float(max_val) * mult if metric_name == "total_seconds" else float(max_val)
+        if cur_num > effective_max:
+            floor_failures.append(f"{metric_name}={cur_num} > max ceiling {effective_max}")
 
     return {
         "baseline_version": baseline.get("baseline_version", "unknown"),

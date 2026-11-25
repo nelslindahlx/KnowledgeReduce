@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import Literal, Protocol, runtime_checkable
 
 import networkx as nx
 import numpy as np
@@ -158,6 +159,41 @@ def rank_claim_summaries(
     return filtered[:limit]
 
 
+CLAIM_SORT_FIELDS = frozenset({"quality_score", "reliability", "confidence", "updated_at"})
+
+
+def normalize_query_datetime(value: datetime) -> datetime:
+    """Return a UTC timezone-aware datetime for consistent storage comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def sort_claims_in_memory(
+    claims: Sequence[Claim],
+    *,
+    sort_by: Literal["quality_score", "reliability", "confidence", "updated_at"] | None,
+    descending: bool,
+) -> list[Claim]:
+    """Sort claims matching DuckDB SQL semantics with deterministic ``claim_id ASC`` tie-break."""
+    if sort_by is None:
+        return list(claims)
+    sign = -1.0 if descending else 1.0
+
+    def _key(claim: Claim) -> tuple[float, str]:
+        if sort_by == "reliability":
+            val = float(int(claim.reliability))
+        elif sort_by == "confidence":
+            val = claim.confidence
+        elif sort_by == "updated_at":
+            val = normalize_query_datetime(claim.updated_at).timestamp()
+        else:
+            val = claim.quality_score
+        return (sign * val, claim.claim_id)
+
+    return sorted(claims, key=_key)
+
+
 @runtime_checkable
 class GraphStore(Protocol):
     """Unified interface satisfied by all KnowledgeReduce storage backends."""
@@ -172,6 +208,14 @@ class GraphStore(Protocol):
 
     def layer_exists(self, layer_id: str) -> bool:
         """Return whether *layer_id* exists in this store."""
+        ...
+
+    def get_layer_manifest(self, layer_id: str) -> KnowledgeLayer:
+        """Return manifest metadata for *layer_id* without loading full layer tables."""
+        ...
+
+    def list_source_hashes(self, layer_id: str) -> tuple[dict[str, str], dict[str, str]]:
+        """Return ``(uri -> sha256, source_id -> sha256)`` maps without full layer load."""
         ...
 
     def list_layers(self) -> list[KnowledgeLayer]:
@@ -200,13 +244,23 @@ class GraphStore(Protocol):
         *,
         category: str | None = None,
         tag: str | None = None,
+        tags_any: Sequence[str] | None = None,
         min_reliability: ReliabilityRating | None = None,
         needs_review: bool | None = None,
         text_query: str | None = None,
+        recorded_after: datetime | None = None,
+        recorded_before: datetime | None = None,
+        published_after: datetime | None = None,
+        published_before: datetime | None = None,
+        subject_id: str | None = None,
+        predicate: str | None = None,
+        source_id: str | None = None,
+        sort_by: Literal["quality_score", "reliability", "confidence", "updated_at"] | None = None,
+        descending: bool = True,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Claim]:
-        """Query claims in *layer_id* with structured filters."""
+        """Query claims in *layer_id* with structured filters and optional sorting."""
         ...
 
     def list_relations(

@@ -17,12 +17,17 @@ class QueryBuilder:
         self._store = store
         self._layer_id = layer_id
         self._category: str | None = None
-        self._tags_any: tuple[str, ...] = ()
+        self._tags_any: tuple[str, ...] | None = None
         self._min_reliability: ReliabilityRating | None = None
         self._needs_review: bool | None = None
         self._text_query: str | None = None
         self._recorded_after: datetime | None = None
         self._recorded_before: datetime | None = None
+        self._published_after: datetime | None = None
+        self._published_before: datetime | None = None
+        self._subject_id: str | None = None
+        self._predicate: str | None = None
+        self._source_id: str | None = None
         self._entity_type: str | None = None
         self._name_query: str | None = None
         self._sort_by: Literal["quality_score", "reliability", "confidence", "updated_at"] = (
@@ -41,6 +46,11 @@ class QueryBuilder:
         copied._text_query = self._text_query
         copied._recorded_after = self._recorded_after
         copied._recorded_before = self._recorded_before
+        copied._published_after = self._published_after
+        copied._published_before = self._published_before
+        copied._subject_id = self._subject_id
+        copied._predicate = self._predicate
+        copied._source_id = self._source_id
         copied._entity_type = self._entity_type
         copied._name_query = self._name_query
         copied._sort_by = self._sort_by
@@ -98,6 +108,36 @@ class QueryBuilder:
         q._recorded_before = before
         return q
 
+    def filter_published_range(
+        self,
+        *,
+        after: datetime | None = None,
+        before: datetime | None = None,
+    ) -> QueryBuilder:
+        """Filter claims whose ``published_at`` falls inside ``[after, before]``."""
+        q = self._clone()
+        q._published_after = after
+        q._published_before = before
+        return q
+
+    def filter_subject(self, subject_id: str) -> QueryBuilder:
+        """Filter claims matching exact *subject_id*."""
+        q = self._clone()
+        q._subject_id = subject_id
+        return q
+
+    def filter_predicate(self, predicate: str) -> QueryBuilder:
+        """Filter claims matching exact *predicate*."""
+        q = self._clone()
+        q._predicate = predicate
+        return q
+
+    def filter_source(self, source_id: str) -> QueryBuilder:
+        """Filter claims emitted from *source_id*."""
+        q = self._clone()
+        q._source_id = source_id
+        return q
+
     def filter_entity_type(self, entity_type: str) -> QueryBuilder:
         """Filter entities matching *entity_type*."""
         q = self._clone()
@@ -124,36 +164,33 @@ class QueryBuilder:
         return q
 
     def execute_claims(self) -> list[Claim]:
-        """Execute query and return matching sorted ``Claim`` records."""
-        claims = self._store.list_claims(
+        """Execute query with store-level filtering, sorting, and pagination pushdown."""
+        single_tag = (
+            self._tags_any[0] if self._tags_any is not None and len(self._tags_any) == 1 else None
+        )
+        multi_tags = (
+            self._tags_any if self._tags_any is not None and len(self._tags_any) != 1 else None
+        )
+        return self._store.list_claims(
             self._layer_id,
             category=self._category,
-            tag=self._tags_any[0] if len(self._tags_any) == 1 else None,
+            tag=single_tag,
+            tags_any=multi_tags,
             min_reliability=self._min_reliability,
             needs_review=self._needs_review,
             text_query=self._text_query,
-            limit=100_000,
-            offset=0,
+            recorded_after=self._recorded_after,
+            recorded_before=self._recorded_before,
+            published_after=self._published_after,
+            published_before=self._published_before,
+            subject_id=self._subject_id,
+            predicate=self._predicate,
+            source_id=self._source_id,
+            sort_by=self._sort_by,
+            descending=self._descending,
+            limit=self._limit,
+            offset=self._offset,
         )
-        if len(self._tags_any) > 1:
-            allowed_tags = set(self._tags_any)
-            claims = [c for c in claims if allowed_tags.intersection(c.tags)]
-        if self._recorded_after is not None:
-            claims = [c for c in claims if c.recorded_at >= self._recorded_after]
-        if self._recorded_before is not None:
-            claims = [c for c in claims if c.recorded_at <= self._recorded_before]
-
-        def _sort_key(claim: Claim) -> float:
-            if self._sort_by == "reliability":
-                return float(int(claim.reliability))
-            if self._sort_by == "confidence":
-                return claim.confidence
-            if self._sort_by == "updated_at":
-                return claim.updated_at.timestamp()
-            return claim.quality_score
-
-        claims_sorted = sorted(claims, key=_sort_key, reverse=self._descending)
-        return claims_sorted[self._offset : self._offset + self._limit]
 
     def execute_entities(self) -> list[Entity]:
         """Execute query and return matching ``Entity`` records."""
