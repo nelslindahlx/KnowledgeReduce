@@ -45,6 +45,10 @@ def test_semver_manifest_parity() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     pyproject_ver = pyproject["project"]["version"]
     assert knowledgereduce.__version__ == pyproject_ver
+    citation = yaml.safe_load(
+        (REPO_ROOT / "docs" / "paper" / "CITATION.cff").read_text(encoding="utf-8")
+    )
+    assert str(citation["version"]) == pyproject_ver
 
 
 def test_github_workflows_are_workflow_dispatch_only() -> None:
@@ -97,9 +101,11 @@ def test_no_tracked_pyc_or_notebook_outputs_or_local_paths() -> None:
         REPO_ROOT / "CONTRIBUTING.md",
         REPO_ROOT / "CHANGELOG.md",
         REPO_ROOT / "Makefile",
+        REPO_ROOT / "README.md",
         REPO_ROOT / "lessons_learned.md",
         *sorted((REPO_ROOT / ".github").rglob("*")),
         *sorted((REPO_ROOT / ".agents").rglob("*")),
+        *sorted((REPO_ROOT / "docs").glob("*.md")),
         *sorted((REPO_ROOT / "docs" / "plans").glob("*.md")),
         *sorted((REPO_ROOT / "scripts").rglob("*.py")),
         *sorted((REPO_ROOT / "tests" / "meta").glob("*.py")),
@@ -238,3 +244,18 @@ def test_docs_mcp_tools_and_readme_local_ci_parity(tmp_path: Path) -> None:
     assert "quality-and-tests (3.11)" not in readme
     assert "maker-checker-gate" not in readme
     assert f"knowledgereduce {knowledgereduce.__version__}" in readme
+
+
+def test_coverage_gate_parity() -> None:
+    gate_files = (
+        REPO_ROOT / "Makefile",
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / ".agents" / "AGENTS.md",
+        REPO_ROOT / "CONTRIBUTING.md",
+        REPO_ROOT / ".github" / "pull_request_template.md",
+        REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    )
+    for path in gate_files:
+        text = path.read_text(encoding="utf-8")
+        assert "--cov-fail-under=95" in text, f"Expected 95% coverage gate in {path.name}"
+        assert "--cov-fail-under=85" not in text, f"Stale 85% coverage gate in {path.name}"

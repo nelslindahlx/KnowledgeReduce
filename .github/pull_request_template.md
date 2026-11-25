@@ -6,7 +6,7 @@
 
 ## Maker Checklist
 - [ ] Changes live on a dedicated feature branch targeting `main` (never pushed directly to `main`).
-- [ ] Local CI ran and passed on the latest commit (`make local-ci`: canary meta-gate, `ruff check`, `ruff format --check`, `mypy --strict src`, `pytest --cov-fail-under=85`, `examples/*.py`, `notebooks/*.ipynb`, and 1K benchmark).
+- [ ] Local CI ran and passed on the latest commit (`make local-ci`: canary meta-gate, `ruff check`, `ruff format --check`, `mypy --strict src`, `pytest --cov-fail-under=95`, `examples/*.py`, `notebooks/*.ipynb`, and 1K benchmark).
 - [ ] Regression and negative tests cover new behavior/edge cases.
 - [ ] Zero tracked `*.pyc` files, zero committed cell outputs in `notebooks/*.ipynb`, and zero leaked machine-local paths.
 - [ ] `CHANGELOG.md`, `lessons_learned.md`, and `docs/plans/` updated as appropriate.

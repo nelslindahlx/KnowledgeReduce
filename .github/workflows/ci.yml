@@ -28,6 +28,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python-version }} --extra dev
 
+      - name: Canary import & governance meta-gate
+        run: |
+          uv run --python ${{ matrix.python-version }} python -W error::Warning -c "import knowledgereduce"
+          uv run --python ${{ matrix.python-version }} pytest tests/meta/ -q
+
       - name: Lint with ruff
         run: uv run --python ${{ matrix.python-version }} ruff check src tests examples benchmarks scripts
 
@@ -42,7 +47,7 @@ jobs:
           uv run --python ${{ matrix.python-version }} pytest \
             --cov=knowledgereduce \
             --cov-report=term-missing \
-            --cov-fail-under=85
+            --cov-fail-under=95
 
       - name: Run offline examples
         if: matrix.python-version == '3.12'
@@ -53,25 +58,12 @@ jobs:
 
       - name: Validate and execute curated notebooks
         if: matrix.python-version == '3.12'
-        run: |
-          uv run --python ${{ matrix.python-version }} python - <<'PY'
-          from pathlib import Path
-          import nbformat
-
-          for nb_path in sorted(Path("notebooks").glob("*.ipynb")):
-              nb = nbformat.read(nb_path, as_version=4)
-              has_outputs = any(
-                  c.cell_type == "code" and (c.get("outputs") or c.get("execution_count") is not None)
-                  for c in nb.cells
-              )
-              assert not has_outputs, f"Committed outputs found in {nb_path}"
-              ns: dict[str, object] = {}
-              for idx, cell in enumerate(nb.cells):
-                  if cell.cell_type == "code":
-                      exec(compile(cell.source, f"{nb_path}:cell[{idx}]", "exec"), ns)
-          print("All curated notebooks validated cleanly with zero committed outputs.")
-          PY
+        run: uv run --python ${{ matrix.python-version }} python scripts/verify_notebooks.py
 
       - name: Run offline golden & scaling benchmark
         if: matrix.python-version == '3.12'
         run: uv run --python ${{ matrix.python-version }} python benchmarks/run_benchmark.py --scale 1000
+
+      - name: Run offline multi-source stack golden benchmark
+        if: matrix.python-version == '3.12'
+        run: uv run --python ${{ matrix.python-version }} python benchmarks/multisource_stack_benchmark.py --strict-regression

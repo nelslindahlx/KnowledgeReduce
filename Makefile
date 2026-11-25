@@ -70,5 +70,5 @@ audit-prs:
 	$(PYTHON) scripts/github_pr_helper.py --audit
 
 clean:
-	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .mypy_cache htmlcov/ .coverage coverage.xml
+	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .mypy_cache .hypothesis htmlcov/ .coverage coverage.xml
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
