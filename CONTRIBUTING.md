@@ -26,8 +26,8 @@ make canary      # <10s: import warning gate + tests/meta/ invariants & governan
 make lint        # ruff check & ruff format --check across src, tests, examples, benchmarks, scripts
 make typecheck   # mypy --strict src
 make smoke-pr    # canary + lint + typecheck + tests/unit/ + tests/golden/
-make test        # full pytest suite with --cov-fail-under=85
-make golden      # Civic Honors book strict regression benchmark
+make test        # full pytest suite with --cov-fail-under=95
+make golden      # Civic Honors book and multi-source stack strict regression benchmarks
 make local-ci    # complete local CI gate (canary + lint + typecheck + test + examples + notebooks + 1K benchmark)
 ```
 
@@ -38,7 +38,7 @@ uv run --no-sync python -W error::Warning -c "import knowledgereduce"
 uv run --no-sync ruff check src tests examples benchmarks scripts
 uv run --no-sync ruff format --check src tests examples benchmarks scripts
 uv run --no-sync mypy --strict src
-uv run --no-sync pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=85
+uv run --no-sync pytest --cov=knowledgereduce --cov-report=term-missing --cov-fail-under=95
 uv run --no-sync python benchmarks/run_benchmark.py --scale 1000
 ```
 

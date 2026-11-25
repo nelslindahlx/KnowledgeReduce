@@ -42,6 +42,7 @@ All records are strict **Pydantic v2** models (`extra="forbid"`) with timezone-a
 - Confidence: `confidence * 25.0` (0–25 pts)
 - Usage: `min(usage_count, 10) * 1.5` (0–15 pts)
 - Evidence depth: `min(len(evidence), 5) * 2.0` (0–10 pts)
+- Structural grounding: `+5.0` for complete `(subject_id, predicate, object_id|object_literal)` triple, or `+2.5` for partial `(subject_id, predicate)` grounding (total score clamped to `[0.0, 100.0]`)
 
 ---
 
@@ -60,8 +61,8 @@ Each layer is stored atomically inside `<store_dir>/layers/<layer_id>/`:
 └── claim_embeddings.parquet   # optional persisted L2-normalized claim vector index (created on build_index/first query)
 ```
 
-- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)`, `UNNEST(?::VARCHAR[])`, `list_filter(?::VARCHAR[], ...)`, `?` placeholders — zero SQL string interpolation).
-- `HybridGraphRAGRetriever` persists `claim_embeddings.parquet` for stateless embedding providers (`HashingEmbeddingProvider`, `SentenceTransformerProvider`), pre-filters lexical and vector candidates, and expands graph context via `get_k_hop_subgraph` without loading entire large layers into memory.
+- `DuckDBParquetStore` queries Parquet files using **parameterized DuckDB SQL** (`read_parquet(?)`, `UNNEST(?::VARCHAR[])`, `list_filter(?::VARCHAR[], ...)`, `?` placeholders — zero SQL string interpolation) over a thread-safe persistent `:memory:` DuckDB read session (`_read_con`, guarded by `_con_lock`), paired with `(st_mtime_ns, st_size)`-validated `ClaimSummary` and bounded layer-graph caches evicted automatically on layer writes and deletes.
+- `HybridGraphRAGRetriever` persists `FixedSizeListArray` `claim_embeddings.parquet` zero-copy vector indices for stateless embedding providers (`HashingEmbeddingProvider`, `SentenceTransformerProvider`), scores lightweight `ClaimSummary` projections first, hydrates full `Claim` models only for `top_k` winners, and expands graph context via `get_k_hop_subgraph` without loading entire large layers into memory.
 - Empty tables preserve full PyArrow schemas.
 - Overwriting an existing immutable layer requires explicit `overwrite=True` (which cleanly invalidates any prior `claim_embeddings.parquet`).
 

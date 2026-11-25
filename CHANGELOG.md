@@ -2,6 +2,11 @@
 
 All notable changes to KnowledgeReduce are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Synchronized repository governance, CI documentation, `docs/paper/CITATION.cff` (`1.5.0`), and `Makefile` clean/gate parity (`--cov-fail-under=95` across `AGENTS.md`, `.agents/AGENTS.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md`, and `.github/workflows/ci.yml`), updated `docs/architecture.md` with structural grounding weights and persistent DuckDB session/projection cache architecture, and expanded `tests/meta/test_governance_and_invariants.py` with `CITATION.cff`, coverage-gate parity, and `README.md`/`docs/*.md` local-path checks.
+
 ## [1.5.0] - 2026-11-24
 
 ### Added

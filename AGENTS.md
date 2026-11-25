@@ -12,8 +12,8 @@ This file defines repository rules and conventions for **KnowledgeReduce**, alig
   - **Lint & Format**: `make lint` (`ruff check src tests examples benchmarks scripts` + `ruff format --check ...`).
   - **Strict Type Check**: `make typecheck` (`mypy --strict src`).
   - **PR Smoke Tier**: `make smoke-pr` (`canary` + `lint` + `typecheck` + `tests/unit/` + `tests/golden/`).
-  - **Full Local CI (Mandatory Before PR Merge)**: `make local-ci` (`canary`, `lint`, `typecheck`, `pytest --cov=knowledgereduce --cov-fail-under=85`, `examples/*.py`, stripped `notebooks/*.ipynb` execution, and `benchmarks/run_benchmark.py --scale 1000`).
-  - **Real-World Golden Regression Gate**: `make golden` (`benchmarks/civichonors_book_benchmark.py --strict-regression`).
+  - **Full Local CI (Mandatory Before PR Merge)**: `make local-ci` (`canary`, `lint`, `typecheck`, `pytest --cov=knowledgereduce --cov-fail-under=95`, `examples/*.py`, stripped `notebooks/*.ipynb` execution, and `benchmarks/run_benchmark.py --scale 1000`).
+  - **Real-World & Multi-Source Golden Regression Gate**: `make golden` (`benchmarks/civichonors_book_benchmark.py --strict-regression` and `benchmarks/multisource_stack_benchmark.py --strict-regression`).
 
 ---
 
