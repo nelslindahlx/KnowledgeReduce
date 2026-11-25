@@ -604,3 +604,69 @@ def test_deterministic_mapper_two_pass_linking_and_nonfunctional_triples() -> No
     assert prog_sent.object_id is not None
     assert any(r.relation_type == "STRENGTHENS" for r in reduced.relations)
     assert all(not is_functional_predicate(pred) for pred in _ANCHORED_VERB_MAP.values())
+
+
+def test_deterministic_mapper_clause_stops_org_typing_and_temporal_conflicts() -> None:
+    src_primary = SourceDocument(
+        source_id="src-primary",
+        uri="https://civichonors.com/facts",
+        source_type=SourceType.WEB,
+        title="Civic Honors Notes",
+        content=(
+            "Dr. Nels Lindahl studied at University of Kansas during the spring of 2002.\n"
+            "Dr. Nels Lindahl is based in Denver, Colorado conducting civic research.\n"
+            "Gulick and Urwick published via Institute of Public Administration and Fortune Magazine.\n"
+            "Thompson published Organizations in Action through McGraw-Hill.\n"
+            "The university can bridge community partners.\n"
+            "Civic Engagement has been fostered by student leaders."
+        ),
+        trust_weight=0.95,
+    )
+    src_conflict = SourceDocument(
+        source_id="src-blog",
+        uri="https://blog.example/post",
+        source_type=SourceType.WEB,
+        title="Blog Post",
+        content="Dr. Nels Lindahl studied at University of Kansas during the spring of 2004.",
+        trust_weight=0.40,
+    )
+    mapper = DeterministicNLPMapper(min_sentence_length=20)
+    b1 = mapper.map_document(src_primary)
+    b2 = mapper.map_document(src_conflict)
+
+    ents_by_name = {e.canonical_name: e for e in b1.entities}
+    assert ents_by_name["Fortune Magazine"].entity_type == "ORG"
+    assert ents_by_name["Institute of Public Administration"].entity_type == "ORG"
+    assert "McGraw-Hill" in ents_by_name
+
+    c_studied = next(c for c in b1.claims if "studied at" in c.statement)
+    assert c_studied.predicate == "STUDIED_AT"
+    assert c_studied.object_literal == "University of Kansas"
+
+    c_based = next(c for c in b1.claims if "is based in" in c.statement)
+    assert c_based.predicate == "IS_BASED_IN"
+    assert c_based.object_literal == "Denver, Colorado"
+
+    c_uni = next(c for c in b1.claims if "The university can bridge" in c.statement)
+    assert c_uni.predicate == "BRIDGES"
+    assert c_uni.subject_id == ents_by_name["University of Kansas"].entity_id
+
+    c_passive = next(c for c in b1.claims if "has been fostered" in c.statement)
+    assert c_passive.predicate == "FOSTERED_BY"
+    assert c_passive.subject_id == ents_by_name["Civic Engagement"].entity_id
+
+    reduced = KnowledgeReducer(conflict_strategy=ConflictStrategy.PRESERVE_DISPUTE).reduce_batches(
+        [b1, b2], layer_id="v14-p2-test", layer_name="v14 Phase 2 Test"
+    )
+    assert len(reduced.conflicts) == 1
+    assert reduced.conflicts[0].target_key.endswith("::STUDIED_AT::year")
+    assert reduced.conflicts[0].winning_value == "2002"
+    assert any(r.relation_type == "CONTRADICTS" for r in reduced.relations)
+
+    # Also verify non-PRESERVE_DISPUTE strategy picks the trusted winner cleanly.
+    resolved_trust = KnowledgeReducer(
+        conflict_strategy=ConflictStrategy.SOURCE_TRUST_PRIORITY
+    ).reduce_batches([b1, b2], layer_id="v14-p2-trust", layer_name="v14 Phase 2 Trust")
+    assert len(resolved_trust.conflicts) == 1
+    assert resolved_trust.conflicts[0].needs_review is False
+    assert resolved_trust.conflicts[0].winning_value == "2002"

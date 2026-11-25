@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 
 from benchmarks.civichonors_book_benchmark import (
+    BASELINE_V13_PATH,
     SOURCE_DOC_PATH,
     BookEvaluationResult,
     compare_against_baseline,
@@ -67,6 +68,14 @@ def test_civichonors_book_meets_v1_1_0_baseline_floors(
     assert comparison["passed_floors"] is True, comparison["floor_failures"]
     assert comparison["floor_failures"] == []
     assert book_eval.warm_query_top1_matches_cold is True
+
+    assert BASELINE_V13_PATH.is_file()
+    v13_baseline = load_baseline(BASELINE_V13_PATH)
+    v13_cmp = compare_against_baseline(book_eval.metrics, v13_baseline)
+    assert v13_cmp["baseline_version"] == "1.3.0"
+    assert v13_cmp["passed_floors"] is True, v13_cmp["floor_failures"]
+    assert book_eval.metrics.grounded_triple_rate >= 0.25
+    assert book_eval.metrics.isolated_node_ratio <= 0.45
 
 
 def test_civichonors_book_deterministic_reproducibility(
