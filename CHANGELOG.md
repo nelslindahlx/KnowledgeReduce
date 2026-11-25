@@ -2,6 +2,14 @@
 
 All notable changes to KnowledgeReduce are documented in this file.
 
+## [1.4.0] - 2026-11-24
+
+### Added
+- **Phase 1: `O(N)` Claim Merge Features & Zero-Copy Arrow Embeddings (`#32`)**:
+  - Precomputed frozen `@dataclass(slots=True)` `_ClaimMergeFeatures` once per claim in `src/knowledgereduce/resolve/blocking.py` (`_extract_merge_features`, `_features_compatible`, and backward-compatible `_claims_compatible_for_merge`), eliminating repeated regex evaluation across Stage 2 blocking and Stage 3 dense-bucket loops.
+  - Updated `src/knowledgereduce/storage/duckdb_store.py` to write `claim_embeddings.parquet` as `pa.FixedSizeListArray`, decode embeddings via zero-copy `to_numpy` with backward-compatible fallback for legacy `list<float32>` Parquet files, cache loaded embeddings keyed by `(mtime_ns, size)` with eviction on `save_layer`/`delete_layer`/`save_claim_embeddings`, and share a single `duckdb.connect(":memory:")` session across `load_layer()` and `get_k_hop_subgraph()`.
+  - Cut `1K` `reduce_seconds` from `3.19s` -> `0.387s` (`8.2x`), *Civic Honors: The Book* `reduce_seconds` from `3.12s` -> `0.623s` (`5.0x`), and `10K` end-to-end cold scaling from `27.00s` -> `4.241s` (`6.4x`), while cutting warm query latency nearly in half with zero accuracy regressions.
+
 ## [1.3.0] - 2026-11-24
 
 ### Added

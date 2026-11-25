@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from rapidfuzz import fuzz
@@ -19,6 +20,22 @@ _WORD_RE = re.compile(r"[a-z0-9]{3,}")
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _APA_REF_RE = re.compile(r"^[A-Z][a-zA-Z'-]+,\s+[A-Z]\.(?:\s*[A-Z]\.)?")
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaimMergeFeatures:
+    """Precomputed O(N) claim features for fast Stage 2/Stage 3 merge checks."""
+
+    subject_id: str | None
+    norm_pred: str
+    is_functional: bool
+    norm_val: str
+    object_id: str | None
+    is_apa_ref: bool
+    years: frozenset[str]
+    numbers: frozenset[str]
+    norm_stmt: str
+    ends_punct: bool
 
 
 def _resolve_functional_vocab(
@@ -38,6 +55,64 @@ def _is_functional_predicate(predicate: str, functional_vocab: frozenset[str]) -
     return norm in functional_vocab or norm.endswith(("_IN", "_AT", "_ON", "_YEAR", "_DATE"))
 
 
+def _extract_merge_features(
+    claim: Claim,
+    functional_vocab: frozenset[str],
+) -> _ClaimMergeFeatures:
+    """Extract normalized statement, predicate, and numeric features once per claim."""
+    stripped = claim.statement.strip()
+    norm_pred = claim.predicate.strip().upper() if claim.predicate else ""
+    is_func = bool(norm_pred) and _is_functional_predicate(norm_pred, functional_vocab)
+    norm_val = (claim.object_literal or claim.object_id or "").strip().lower()
+    return _ClaimMergeFeatures(
+        subject_id=claim.subject_id,
+        norm_pred=norm_pred,
+        is_functional=is_func,
+        norm_val=norm_val,
+        object_id=claim.object_id,
+        is_apa_ref=bool(_APA_REF_RE.match(stripped)),
+        years=frozenset(_YEAR_RE.findall(claim.statement)),
+        numbers=frozenset(_NUMBER_RE.findall(claim.statement)),
+        norm_stmt=normalize_text(stripped),
+        ends_punct=stripped.endswith((".", "!", "?")),
+    )
+
+
+def _features_compatible(a: _ClaimMergeFeatures, b: _ClaimMergeFeatures) -> bool:
+    """Return False when precomputed features assert differing facts, years, or APA citations."""
+    if (
+        a.subject_id
+        and b.subject_id
+        and a.norm_pred
+        and a.subject_id == b.subject_id
+        and a.norm_pred == b.norm_pred
+    ):
+        if a.is_functional:
+            if a.norm_val and b.norm_val and a.norm_val != b.norm_val:
+                return False
+        elif a.object_id and b.object_id and a.object_id != b.object_id:
+            return False
+
+    if a.is_apa_ref != b.is_apa_ref:
+        return False
+
+    if bool(a.years) != bool(b.years):
+        undated = b if a.years else a
+        dated = a if a.years else b
+        # Allow an unpunctuated heading/fragment subsumed verbatim inside a longer dated
+        # sentence to merge so the full dated sentence absorbs it without fact loss.
+        is_subsumed_fragment = (
+            bool(undated.norm_stmt)
+            and not undated.ends_punct
+            and len(dated.norm_stmt) > len(undated.norm_stmt)
+            and undated.norm_stmt in dated.norm_stmt
+        )
+        if not is_subsumed_fragment:
+            return False
+
+    return not (a.numbers and b.numbers and a.numbers != b.numbers)
+
+
 def _claims_compatible_for_merge(
     a: Claim,
     b: Claim,
@@ -45,46 +120,10 @@ def _claims_compatible_for_merge(
 ) -> bool:
     """Return False when two claims assert differing facts, years, or APA citations."""
     vocab = functional_vocab if functional_vocab is not None else _resolve_functional_vocab(None)
-    if (
-        a.subject_id
-        and b.subject_id
-        and a.predicate
-        and b.predicate
-        and a.subject_id == b.subject_id
-        and a.predicate.strip().upper() == b.predicate.strip().upper()
-    ):
-        if _is_functional_predicate(a.predicate, vocab):
-            val_a = (a.object_literal or a.object_id or "").strip().lower()
-            val_b = (b.object_literal or b.object_id or "").strip().lower()
-            if val_a and val_b and val_a != val_b:
-                return False
-        elif a.object_id and b.object_id and a.object_id != b.object_id:
-            return False
-
-    if bool(_APA_REF_RE.match(a.statement.strip())) != bool(_APA_REF_RE.match(b.statement.strip())):
-        return False
-
-    years_a = set(_YEAR_RE.findall(a.statement))
-    years_b = set(_YEAR_RE.findall(b.statement))
-    if bool(years_a) != bool(years_b):
-        undated_stmt = b.statement.strip() if years_a else a.statement.strip()
-        dated_stmt = a.statement.strip() if years_a else b.statement.strip()
-        norm_undated = normalize_text(undated_stmt)
-        norm_dated = normalize_text(dated_stmt)
-        # Allow an unpunctuated heading/fragment subsumed verbatim inside a longer dated
-        # sentence to merge so the full dated sentence absorbs it without fact loss.
-        is_subsumed_fragment = (
-            bool(norm_undated)
-            and not undated_stmt.endswith((".", "!", "?"))
-            and len(norm_dated) > len(norm_undated)
-            and norm_undated in norm_dated
-        )
-        if not is_subsumed_fragment:
-            return False
-
-    nums_a = set(_NUMBER_RE.findall(a.statement))
-    nums_b = set(_NUMBER_RE.findall(b.statement))
-    return not (nums_a and nums_b and nums_a != nums_b)
+    return _features_compatible(
+        _extract_merge_features(a, vocab),
+        _extract_merge_features(b, vocab),
+    )
 
 
 class DisjointSet:
@@ -142,18 +181,23 @@ def _cluster_dense_bucket(
     semantic_threshold: float,
     *,
     functional_vocab: frozenset[str],
+    bucket_features: Sequence[_ClaimMergeFeatures] | None = None,
 ) -> list[list[int]]:
     n = vectors.shape[0]
     if n <= 1:
         return [[0]] if n == 1 else []
+    features = (
+        bucket_features
+        if bucket_features is not None
+        else [_extract_merge_features(clm, functional_vocab) for clm in bucket_claims]
+    )
     sim = np.matmul(vectors, vectors.T)
     dist = np.clip(1.0 - sim, 0.0, 2.0)
     np.fill_diagonal(dist, 0.0)
     for i in range(n):
+        fi = features[i]
         for j in range(i + 1, n):
-            if not _claims_compatible_for_merge(
-                bucket_claims[i], bucket_claims[j], functional_vocab=functional_vocab
-            ):
+            if not _features_compatible(fi, features[j]):
                 dist[i, j] = 2.0
                 dist[j, i] = 2.0
 
@@ -175,15 +219,9 @@ def _cluster_dense_bucket(
         subgroups: list[list[int]] = []
         for idx in raw_group:
             placed = False
+            f_idx = features[idx]
             for sg in subgroups:
-                if all(
-                    _claims_compatible_for_merge(
-                        bucket_claims[idx],
-                        bucket_claims[other],
-                        functional_vocab=functional_vocab,
-                    )
-                    for other in sg
-                ):
+                if all(_features_compatible(f_idx, features[other]) for other in sg):
                     sg.append(idx)
                     placed = True
                     break
@@ -232,9 +270,10 @@ def cluster_claims(
     if len(stage1_clusters) == 1:
         return stage1_clusters, dropped
 
-    # Stage 2: Blocked lexical similarity over Stage 1 cluster heads.
+    # Stage 2: Blocked lexical similarity over precomputed Stage 1 cluster heads.
     n_s1 = len(stage1_clusters)
-    s1_norms = [normalize_text(group[0].statement) for group in stage1_clusters]
+    s1_features = [_extract_merge_features(group[0], functional_vocab) for group in stage1_clusters]
+    s1_norms = [feat.norm_stmt for feat in s1_features]
     block_index: dict[str, list[int]] = defaultdict(list)
     for idx, norm in enumerate(s1_norms):
         for bkey in _token_blocking_keys(norm):
@@ -248,6 +287,8 @@ def cluster_claims(
             continue
         for i_pos in range(len(members)):
             i = members[i_pos]
+            fi = s1_features[i]
+            norm_i = s1_norms[i]
             for j_pos in range(i_pos + 1, len(members)):
                 j = members[j_pos]
                 pair = (i, j) if i < j else (j, i)
@@ -255,21 +296,19 @@ def cluster_claims(
                     continue
                 checked_pairs.add(pair)
                 if (
-                    _claims_compatible_for_merge(
-                        stage1_clusters[i][0],
-                        stage1_clusters[j][0],
-                        functional_vocab=functional_vocab,
-                    )
-                    and fuzz.token_sort_ratio(s1_norms[i], s1_norms[j]) >= cutoff
+                    _features_compatible(fi, s1_features[j])
+                    and fuzz.token_sort_ratio(norm_i, s1_norms[j]) >= cutoff
                 ):
                     dsu.union(i, j)
 
     stage2_clusters: list[list[Claim]] = []
+    s2_features: list[_ClaimMergeFeatures] = []
     for idx_group in dsu.groups():
         merged: list[Claim] = []
         for idx in idx_group:
             merged.extend(stage1_clusters[idx])
         stage2_clusters.append(merged)
+        s2_features.append(s1_features[idx_group[0]])
 
     if len(stage2_clusters) < 2:
         return stage2_clusters, dropped
@@ -292,6 +331,7 @@ def cluster_claims(
             s2_reps,
             semantic_threshold,
             functional_vocab=functional_vocab,
+            bucket_features=s2_features,
         ):
             combined: list[Claim] = []
             for idx in idx_group:
@@ -321,11 +361,13 @@ def cluster_claims(
             sub_indices = bucket_indices[start : start + dense_cluster_limit]
             sub_vecs = vectors[sub_indices]
             sub_reps = [s2_reps[idx] for idx in sub_indices]
+            sub_feats = [s2_features[idx] for idx in sub_indices]
             for local_group in _cluster_dense_bucket(
                 sub_vecs,
                 sub_reps,
                 semantic_threshold,
                 functional_vocab=functional_vocab,
+                bucket_features=sub_feats,
             ):
                 combined = []
                 for local_idx in local_group:

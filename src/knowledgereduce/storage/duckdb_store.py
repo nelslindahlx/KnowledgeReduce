@@ -257,6 +257,14 @@ class DuckDBParquetStore:
         self.root_dir = Path(root_dir).resolve()
         self.layers_dir = self.root_dir / "layers"
         self.layers_dir.mkdir(parents=True, exist_ok=True)
+        self._embedding_cache: dict[
+            tuple[str, str], tuple[int, int, tuple[str, ...], NDArray[np.float32]]
+        ] = {}
+
+    def _invalidate_embedding_cache(self, layer_id: str) -> None:
+        stale = [key for key in self._embedding_cache if key[0] == layer_id]
+        for key in stale:
+            self._embedding_cache.pop(key, None)
 
     def _layer_path(self, layer_id: str) -> Path:
         try:
@@ -274,12 +282,20 @@ class DuckDBParquetStore:
             raise StorageError(f"Missing {table_name}.parquet for layer {layer_id!r}.")
         return pq_file
 
+    def _query_rows_with_con(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        sql: str,
+        params: list[Any],
+    ) -> list[dict[str, Any]]:
+        cursor = con.execute(sql, params)
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        rows = cursor.fetchall()
+        return [dict(zip(columns, row, strict=True)) for row in rows]
+
     def _query_rows(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         with duckdb.connect(":memory:") as con:
-            cursor = con.execute(sql, params)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchall()
-        return [dict(zip(columns, row, strict=True)) for row in rows]
+            return self._query_rows_with_con(con, sql, params)
 
     def layer_exists(self, layer_id: str) -> bool:
         try:
@@ -420,6 +436,7 @@ class DuckDBParquetStore:
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             staging_dir.rename(target_dir)
+            self._invalidate_embedding_cache(layer_id)
             return layer_copy
         except Exception:
             if staging_dir.exists():
@@ -434,21 +451,28 @@ class DuckDBParquetStore:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         layer = KnowledgeLayer.model_validate(manifest["layer"])
 
-        source_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?)", [str(self._parquet_path(layer_id, "sources"))]
-        )
-        entity_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?)", [str(self._parquet_path(layer_id, "entities"))]
-        )
-        claim_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?)", [str(self._parquet_path(layer_id, "claims"))]
-        )
-        relation_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?)", [str(self._parquet_path(layer_id, "relations"))]
-        )
-        conflict_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?)", [str(self._parquet_path(layer_id, "conflicts"))]
-        )
+        sources_pq = str(self._parquet_path(layer_id, "sources"))
+        entities_pq = str(self._parquet_path(layer_id, "entities"))
+        claims_pq = str(self._parquet_path(layer_id, "claims"))
+        relations_pq = str(self._parquet_path(layer_id, "relations"))
+        conflicts_pq = str(self._parquet_path(layer_id, "conflicts"))
+
+        with duckdb.connect(":memory:") as con:
+            source_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [sources_pq]
+            )
+            entity_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [entities_pq]
+            )
+            claim_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [claims_pq]
+            )
+            relation_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [relations_pq]
+            )
+            conflict_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [conflicts_pq]
+            )
 
         return LayerData(
             layer=layer,
@@ -475,6 +499,7 @@ class DuckDBParquetStore:
         if not target_dir.exists():
             raise StorageError(f"Layer {layer_id!r} not found.")
         shutil.rmtree(target_dir)
+        self._invalidate_embedding_cache(layer_id)
 
     def list_entities(
         self,
@@ -618,7 +643,7 @@ class DuckDBParquetStore:
                 {"claim_id": [], "model_id": [], "embedding": []},
                 schema=_CLAIM_EMBEDDINGS_SCHEMA,
             )
-        else:
+        elif arr.shape[1] == 0:
             table = pa.table(
                 {
                     "claim_id": pa.array(list(claim_ids), type=pa.string()),
@@ -627,10 +652,30 @@ class DuckDBParquetStore:
                 },
                 schema=_CLAIM_EMBEDDINGS_SCHEMA,
             )
+        else:
+            dim = int(arr.shape[1])
+            flat = pa.array(np.ascontiguousarray(arr, dtype=np.float32).ravel(), type=pa.float32())
+            emb_arr = pa.FixedSizeListArray.from_arrays(flat, dim)
+            emb_schema = pa.schema(
+                [
+                    ("claim_id", pa.string()),
+                    ("model_id", pa.string()),
+                    ("embedding", pa.list_(pa.float32(), dim)),
+                ]
+            )
+            table = pa.table(
+                {
+                    "claim_id": pa.array(list(claim_ids), type=pa.string()),
+                    "model_id": pa.array([model_id] * len(claim_ids), type=pa.string()),
+                    "embedding": emb_arr,
+                },
+                schema=emb_schema,
+            )
         staging_emb = layer_dir / ".staging_claim_embeddings.parquet"
         target_emb = layer_dir / "claim_embeddings.parquet"
         pq.write_table(table, staging_emb, compression="zstd")
         staging_emb.replace(target_emb)
+        self._invalidate_embedding_cache(layer_id)
 
     def load_claim_embeddings(
         self,
@@ -642,15 +687,39 @@ class DuckDBParquetStore:
         emb_path = self._layer_path(layer_id) / "claim_embeddings.parquet"
         if not emb_path.is_file():
             return None
+
+        stat = emb_path.stat()
+        cache_key = (layer_id, model_id)
+        cached = self._embedding_cache.get(cache_key)
+        if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            return list(cached[2]), cached[3]
+
         table = pq.read_table(emb_path)
         if table.num_rows == 0:
             return None
-        stored_models = {str(m) for m in table.column("model_id").to_pylist()}
+        stored_models = {str(m) for m in table.column("model_id").unique().to_pylist()}
         if stored_models != {model_id}:
             return None
-        ids = [str(cid) for cid in table.column("claim_id").to_pylist()]
-        vecs = np.asarray(table.column("embedding").to_pylist(), dtype=np.float32)
-        return ids, vecs
+
+        ids = tuple(str(cid) for cid in table.column("claim_id").to_pylist())
+        emb_col = table.column("embedding").combine_chunks()
+        if (
+            pa.types.is_fixed_size_list(emb_col.type)
+            and emb_col.null_count == 0
+            and emb_col.offset == 0
+        ):
+            dim = int(emb_col.type.list_size)
+            vecs = (
+                np.asarray(emb_col.values.to_numpy(zero_copy_only=False), dtype=np.float32)
+                .reshape(table.num_rows, dim)
+                .copy()
+            )
+        else:
+            vecs = np.asarray(emb_col.to_pylist(), dtype=np.float32)
+
+        vecs.flags.writeable = False
+        self._embedding_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, ids, vecs)
+        return list(ids), vecs
 
     def search_claims_lexical(
         self,
@@ -708,49 +777,63 @@ class DuckDBParquetStore:
 
         visited: set[str] = set(seed_node_ids)
         frontier: set[str] = set(seed_node_ids)
-        for _ in range(max(0, hops)):
-            if not frontier:
-                break
-            frontier_list = list(frontier)
-            hop_rows = self._query_rows(
-                "SELECT source_id, target_id FROM read_parquet(?) "
-                "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
-                "OR target_id IN (SELECT UNNEST(?::VARCHAR[]))",
-                [rel_pq, frontier_list, frontier_list],
-            )
-            next_frontier: set[str] = set()
-            for r in hop_rows:
-                next_frontier.add(str(r["source_id"]))
-                next_frontier.add(str(r["target_id"]))
-            frontier = next_frontier - visited
-            visited.update(frontier)
-
-        visited_list = list(visited)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         layer_meta = KnowledgeLayer.model_validate(manifest["layer"])
 
-        ent_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?) WHERE entity_id IN (SELECT UNNEST(?::VARCHAR[]))",
-            [ent_pq, visited_list],
-        )
-        clm_rows = self._query_rows(
-            "SELECT * FROM read_parquet(?) WHERE claim_id IN (SELECT UNNEST(?::VARCHAR[]))",
-            [clm_pq, visited_list],
-        )
-        sub_entities = [_entity_from_row(r) for r in ent_rows]
-        sub_claims = [_claim_from_row(r) for r in clm_rows]
-        surviving = {e.entity_id for e in sub_entities} | {c.claim_id for c in sub_claims}
+        with duckdb.connect(":memory:") as con:
+            for _ in range(max(0, hops)):
+                if not frontier:
+                    break
+                frontier_list = list(frontier)
+                hop_rows = self._query_rows_with_con(
+                    con,
+                    "SELECT source_id, target_id FROM read_parquet(?) "
+                    "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
+                    "OR target_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                    [rel_pq, frontier_list, frontier_list],
+                )
+                next_frontier: set[str] = set()
+                for r in hop_rows:
+                    next_frontier.add(str(r["source_id"]))
+                    next_frontier.add(str(r["target_id"]))
+                frontier = next_frontier - visited
+                visited.update(frontier)
 
-        sub_relations: list[Relation] = []
-        if hops > 0 and surviving:
-            surviving_list = list(surviving)
-            rel_rows = self._query_rows(
-                "SELECT * FROM read_parquet(?) "
-                "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
-                "AND target_id IN (SELECT UNNEST(?::VARCHAR[]))",
-                [rel_pq, surviving_list, surviving_list],
+            visited_list = list(visited)
+            ent_rows = self._query_rows_with_con(
+                con,
+                "SELECT * FROM read_parquet(?) WHERE entity_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                [ent_pq, visited_list],
             )
-            sub_relations = [_relation_from_row(r) for r in rel_rows]
+            clm_rows = self._query_rows_with_con(
+                con,
+                "SELECT * FROM read_parquet(?) WHERE claim_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                [clm_pq, visited_list],
+            )
+            sub_entities = [_entity_from_row(r) for r in ent_rows]
+            sub_claims = [_claim_from_row(r) for r in clm_rows]
+            surviving = {e.entity_id for e in sub_entities} | {c.claim_id for c in sub_claims}
+
+            sub_relations: list[Relation] = []
+            if hops > 0 and surviving:
+                surviving_list = list(surviving)
+                rel_rows = self._query_rows_with_con(
+                    con,
+                    "SELECT * FROM read_parquet(?) "
+                    "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
+                    "AND target_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                    [rel_pq, surviving_list, surviving_list],
+                )
+                sub_relations = [_relation_from_row(r) for r in rel_rows]
+
+            sub_claim_ids = {c.claim_id for c in sub_claims}
+            touched_conflicts: list[ConflictRecord] = []
+            if sub_claim_ids:
+                cf_rows = self._query_rows_with_con(con, "SELECT * FROM read_parquet(?)", [cf_pq])
+                touched_conflicts = filter_matching_conflicts(
+                    [_conflict_from_row(r) for r in cf_rows],
+                    sub_claim_ids,
+                )
 
         sub_graph = layer_data_to_networkx(
             LayerData(
@@ -760,12 +843,4 @@ class DuckDBParquetStore:
                 relations=sub_relations,
             )
         )
-        sub_claim_ids = {c.claim_id for c in sub_claims}
-        touched_conflicts: list[ConflictRecord] = []
-        if sub_claim_ids:
-            cf_rows = self._query_rows("SELECT * FROM read_parquet(?)", [cf_pq])
-            touched_conflicts = filter_matching_conflicts(
-                [_conflict_from_row(r) for r in cf_rows],
-                sub_claim_ids,
-            )
         return sub_graph, sub_entities, touched_conflicts
