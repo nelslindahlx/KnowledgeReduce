@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
+import threading
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -34,10 +36,22 @@ from knowledgereduce.models import (
 )
 from knowledgereduce.security import ensure_within_base
 from knowledgereduce.storage.base import (
+    ClaimSummary,
     filter_matching_conflicts,
     layer_data_to_networkx,
+    rank_claim_summaries,
     tokenize_search_query,
 )
+
+_CLAIM_SUMMARY_COLUMNS = [
+    "claim_id",
+    "statement",
+    "reliability",
+    "quality_score",
+    "source_title",
+    "author_creator",
+    "contextual_notes",
+]
 
 SCHEMA_VERSION = "1.0"
 
@@ -253,18 +267,71 @@ def _conflict_from_row(row: dict[str, Any]) -> ConflictRecord:
 class DuckDBParquetStore:
     """Persistent columnar layer store writing immutable Parquet files queried via DuckDB."""
 
-    def __init__(self, root_dir: Path | str) -> None:
+    def __init__(self, root_dir: Path | str, *, graph_cache_max_rows: int = 50_000) -> None:
         self.root_dir = Path(root_dir).resolve()
         self.layers_dir = self.root_dir / "layers"
         self.layers_dir.mkdir(parents=True, exist_ok=True)
+        self._graph_cache_max_rows = graph_cache_max_rows
+        self._con_lock = threading.RLock()
+        self._read_con: duckdb.DuckDBPyConnection | None = None
         self._embedding_cache: dict[
             tuple[str, str], tuple[int, int, tuple[str, ...], NDArray[np.float32]]
         ] = {}
+        self._claim_summary_cache: dict[
+            str,
+            tuple[
+                int,
+                int,
+                tuple[ClaimSummary, ...],
+                tuple[str, ...],
+                dict[str, ClaimSummary],
+            ],
+        ] = {}
+        self._layer_graph_cache: dict[
+            str,
+            tuple[
+                tuple[tuple[int, int], ...],
+                KnowledgeLayer,
+                dict[str, Entity],
+                dict[str, list[Relation]],
+                list[ConflictRecord],
+            ],
+        ] = {}
+
+    def _get_read_con(self) -> duckdb.DuckDBPyConnection:
+        if self._read_con is None:
+            self._read_con = duckdb.connect(":memory:")
+        return self._read_con
+
+    def close(self) -> None:
+        """Close the cached in-memory DuckDB read session and release in-memory caches."""
+        with self._con_lock:
+            if self._read_con is not None:
+                self._read_con.close()
+                self._read_con = None
+            self._embedding_cache.clear()
+            self._claim_summary_cache.clear()
+            self._layer_graph_cache.clear()
+
+    def __enter__(self) -> DuckDBParquetStore:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
 
     def _invalidate_embedding_cache(self, layer_id: str) -> None:
         stale = [key for key in self._embedding_cache if key[0] == layer_id]
         for key in stale:
             self._embedding_cache.pop(key, None)
+
+    def _invalidate_layer_caches(self, layer_id: str) -> None:
+        self._invalidate_embedding_cache(layer_id)
+        self._claim_summary_cache.pop(layer_id, None)
+        self._layer_graph_cache.pop(layer_id, None)
 
     def _layer_path(self, layer_id: str) -> Path:
         try:
@@ -294,8 +361,8 @@ class DuckDBParquetStore:
         return [dict(zip(columns, row, strict=True)) for row in rows]
 
     def _query_rows(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        with duckdb.connect(":memory:") as con:
-            return self._query_rows_with_con(con, sql, params)
+        with self._con_lock:
+            return self._query_rows_with_con(self._get_read_con(), sql, params)
 
     def layer_exists(self, layer_id: str) -> bool:
         try:
@@ -436,7 +503,7 @@ class DuckDBParquetStore:
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             staging_dir.rename(target_dir)
-            self._invalidate_embedding_cache(layer_id)
+            self._invalidate_layer_caches(layer_id)
             return layer_copy
         except Exception:
             if staging_dir.exists():
@@ -457,7 +524,8 @@ class DuckDBParquetStore:
         relations_pq = str(self._parquet_path(layer_id, "relations"))
         conflicts_pq = str(self._parquet_path(layer_id, "conflicts"))
 
-        with duckdb.connect(":memory:") as con:
+        with self._con_lock:
+            con = self._get_read_con()
             source_rows = self._query_rows_with_con(
                 con, "SELECT * FROM read_parquet(?)", [sources_pq]
             )
@@ -499,7 +567,7 @@ class DuckDBParquetStore:
         if not target_dir.exists():
             raise StorageError(f"Layer {layer_id!r} not found.")
         shutil.rmtree(target_dir)
-        self._invalidate_embedding_cache(layer_id)
+        self._invalidate_layer_caches(layer_id)
 
     def list_entities(
         self,
@@ -745,6 +813,87 @@ class DuckDBParquetStore:
             for r in self._query_rows(sql, [pq_path, int(min_reliability), like_patterns, limit])
         ]
 
+    def _load_claim_summaries(
+        self, layer_id: str
+    ) -> tuple[tuple[ClaimSummary, ...], tuple[str, ...], dict[str, ClaimSummary]]:
+        claims_pq = self._parquet_path(layer_id, "claims")
+        stat = claims_pq.stat()
+        cached = self._claim_summary_cache.get(layer_id)
+        if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            return cached[2], cached[3], cached[4]
+
+        table = pq.read_table(claims_pq, columns=_CLAIM_SUMMARY_COLUMNS)
+        cids = table.column("claim_id").to_pylist()
+        stmts = table.column("statement").to_pylist()
+        rels = table.column("reliability").to_pylist()
+        quals = table.column("quality_score").to_pylist()
+        titles = table.column("source_title").to_pylist()
+        authors = table.column("author_creator").to_pylist()
+        notes = table.column("contextual_notes").to_pylist()
+
+        summaries_list: list[ClaimSummary] = []
+        lower_list: list[str] = []
+        by_id: dict[str, ClaimSummary] = {}
+        for cid, stmt, rel, qual, title, author, note in zip(
+            cids, stmts, rels, quals, titles, authors, notes, strict=True
+        ):
+            stmt_str = str(stmt)
+            summary = ClaimSummary(
+                claim_id=str(cid),
+                statement=stmt_str,
+                reliability=ReliabilityRating(int(rel)),
+                quality_score=float(qual),
+                source_title=str(title or ""),
+                author_creator=str(author) if author is not None else None,
+                contextual_notes=str(note or ""),
+            )
+            summaries_list.append(summary)
+            lower_list.append(stmt_str.lower())
+            by_id[summary.claim_id] = summary
+
+        summaries_tup = tuple(summaries_list)
+        lower_tup = tuple(lower_list)
+        self._claim_summary_cache[layer_id] = (
+            stat.st_mtime_ns,
+            stat.st_size,
+            summaries_tup,
+            lower_tup,
+            by_id,
+        )
+        return summaries_tup, lower_tup, by_id
+
+    def search_claim_summaries_lexical(
+        self,
+        layer_id: str,
+        query: str,
+        *,
+        min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+        limit: int = 200,
+    ) -> list[ClaimSummary]:
+        """Rank lightweight claim summaries using direct cached Parquet column projections."""
+        if limit <= 0:
+            self._parquet_path(layer_id, "claims")
+            return []
+        summaries, lower_stmts, _by_id = self._load_claim_summaries(layer_id)
+        return rank_claim_summaries(
+            summaries,
+            lower_stmts,
+            query,
+            min_reliability=min_reliability,
+            limit=limit,
+        )
+
+    def get_claim_summaries_by_ids(
+        self, layer_id: str, claim_ids: Sequence[str]
+    ) -> list[ClaimSummary]:
+        """Fetch cached lightweight ``ClaimSummary`` projections matching *claim_ids*."""
+        unique_ids = list(dict.fromkeys(claim_ids))
+        if not unique_ids:
+            self._parquet_path(layer_id, "claims")
+            return []
+        _summaries, _lower_stmts, by_id = self._load_claim_summaries(layer_id)
+        return [by_id[cid] for cid in unique_ids if cid in by_id]
+
     def get_claims_by_ids(self, layer_id: str, claim_ids: Sequence[str]) -> list[Claim]:
         pq_path = str(self._parquet_path(layer_id, "claims"))
         unique_ids = list(dict.fromkeys(claim_ids))
@@ -757,6 +906,80 @@ class DuckDBParquetStore:
         by_id = {str(r["claim_id"]): _claim_from_row(r) for r in rows}
         return [by_id[cid] for cid in unique_ids if cid in by_id]
 
+    def _load_cached_graph_index(
+        self,
+        layer_id: str,
+        manifest_path: Path,
+        ent_pq: Path,
+        rel_pq: Path,
+        cf_pq: Path,
+    ) -> (
+        tuple[
+            KnowledgeLayer,
+            dict[str, Entity],
+            dict[str, list[Relation]],
+            list[ConflictRecord],
+        ]
+        | None
+    ):
+        if self._graph_cache_max_rows <= 0:
+            return None
+        m_st = manifest_path.stat()
+        e_st = ent_pq.stat()
+        r_st = rel_pq.stat()
+        c_st = cf_pq.stat()
+        stamp = (
+            (m_st.st_mtime_ns, m_st.st_size),
+            (e_st.st_mtime_ns, e_st.st_size),
+            (r_st.st_mtime_ns, r_st.st_size),
+            (c_st.st_mtime_ns, c_st.st_size),
+        )
+        cached = self._layer_graph_cache.get(layer_id)
+        if cached is not None and cached[0] == stamp:
+            return cached[1], cached[2], cached[3], cached[4]
+
+        ent_num_rows = int(pq.read_metadata(ent_pq).num_rows)
+        rel_num_rows = int(pq.read_metadata(rel_pq).num_rows)
+        if ent_num_rows > self._graph_cache_max_rows or rel_num_rows > self._graph_cache_max_rows:
+            return None
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        layer_meta = KnowledgeLayer.model_validate(manifest["layer"])
+        cf_num_rows = int(pq.read_metadata(cf_pq).num_rows)
+
+        with self._con_lock:
+            con = self._get_read_con()
+            ent_rows = self._query_rows_with_con(
+                con, "SELECT * FROM read_parquet(?)", [str(ent_pq)]
+            )
+            rel_rows = (
+                self._query_rows_with_con(con, "SELECT * FROM read_parquet(?)", [str(rel_pq)])
+                if rel_num_rows > 0
+                else []
+            )
+            cf_rows = (
+                self._query_rows_with_con(con, "SELECT * FROM read_parquet(?)", [str(cf_pq)])
+                if cf_num_rows > 0
+                else []
+            )
+
+        entities_by_id = {e.entity_id: e for e in (_entity_from_row(r) for r in ent_rows)}
+        adj_relations: dict[str, list[Relation]] = {}
+        for rel in (_relation_from_row(r) for r in rel_rows):
+            adj_relations.setdefault(rel.source_id, []).append(rel)
+            if rel.target_id != rel.source_id:
+                adj_relations.setdefault(rel.target_id, []).append(rel)
+        conflicts = [_conflict_from_row(r) for r in cf_rows]
+
+        self._layer_graph_cache[layer_id] = (
+            stamp,
+            layer_meta,
+            entities_by_id,
+            adj_relations,
+            conflicts,
+        )
+        return layer_meta, entities_by_id, adj_relations, conflicts
+
     def get_k_hop_subgraph(
         self,
         layer_id: str,
@@ -768,36 +991,98 @@ class DuckDBParquetStore:
         manifest_path = layer_dir / "manifest.json"
         if not manifest_path.is_file():
             raise StorageError(f"Layer {layer_id!r} not found.")
-        ent_pq = str(self._parquet_path(layer_id, "entities"))
-        clm_pq = str(self._parquet_path(layer_id, "claims"))
-        rel_pq = str(self._parquet_path(layer_id, "relations"))
-        cf_pq = str(self._parquet_path(layer_id, "conflicts"))
+        ent_path = self._parquet_path(layer_id, "entities")
+        clm_path = self._parquet_path(layer_id, "claims")
+        rel_path = self._parquet_path(layer_id, "relations")
+        cf_path = self._parquet_path(layer_id, "conflicts")
         if not seed_node_ids:
             return nx.MultiDiGraph(), [], []
 
-        visited: set[str] = set(seed_node_ids)
-        frontier: set[str] = set(seed_node_ids)
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        layer_meta = KnowledgeLayer.model_validate(manifest["layer"])
-
-        with duckdb.connect(":memory:") as con:
+        cached_graph = self._load_cached_graph_index(
+            layer_id, manifest_path, ent_path, rel_path, cf_path
+        )
+        if cached_graph is not None:
+            layer_meta, entities_by_id, adj_relations, all_conflicts = cached_graph
+            visited: set[str] = set(seed_node_ids)
+            frontier: set[str] = set(seed_node_ids)
             for _ in range(max(0, hops)):
                 if not frontier:
                     break
-                frontier_list = list(frontier)
-                hop_rows = self._query_rows_with_con(
-                    con,
-                    "SELECT source_id, target_id FROM read_parquet(?) "
-                    "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
-                    "OR target_id IN (SELECT UNNEST(?::VARCHAR[]))",
-                    [rel_pq, frontier_list, frontier_list],
-                )
                 next_frontier: set[str] = set()
-                for r in hop_rows:
-                    next_frontier.add(str(r["source_id"]))
-                    next_frontier.add(str(r["target_id"]))
-                frontier = next_frontier - visited
+                for nid in frontier:
+                    for rel in adj_relations.get(nid, ()):
+                        if rel.source_id not in visited:
+                            next_frontier.add(rel.source_id)
+                        if rel.target_id not in visited:
+                            next_frontier.add(rel.target_id)
+                frontier = next_frontier
                 visited.update(frontier)
+
+            sub_entities = [entities_by_id[nid] for nid in visited if nid in entities_by_id]
+            claim_ids_needed = [nid for nid in visited if nid not in entities_by_id]
+            sub_claims = (
+                self.get_claims_by_ids(layer_id, claim_ids_needed) if claim_ids_needed else []
+            )
+            surviving = {e.entity_id for e in sub_entities} | {c.claim_id for c in sub_claims}
+            sub_relations: list[Relation] = []
+            if hops > 0 and surviving:
+                seen_rel_ids: set[str] = set()
+                for nid in surviving:
+                    for rel in adj_relations.get(nid, ()):
+                        if (
+                            rel.relation_id not in seen_rel_ids
+                            and rel.source_id in surviving
+                            and rel.target_id in surviving
+                        ):
+                            seen_rel_ids.add(rel.relation_id)
+                            sub_relations.append(rel)
+
+            sub_claim_ids = {c.claim_id for c in sub_claims}
+            touched_conflicts = (
+                filter_matching_conflicts(all_conflicts, sub_claim_ids) if sub_claim_ids else []
+            )
+            sub_graph = layer_data_to_networkx(
+                LayerData(
+                    layer=layer_meta,
+                    entities=sub_entities,
+                    claims=sub_claims,
+                    relations=sub_relations,
+                )
+            )
+            return sub_graph, sub_entities, touched_conflicts
+
+        ent_pq = str(ent_path)
+        clm_pq = str(clm_path)
+        rel_pq = str(rel_path)
+        cf_pq = str(cf_path)
+
+        visited = set(seed_node_ids)
+        frontier = set(seed_node_ids)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        layer_meta = KnowledgeLayer.model_validate(manifest["layer"])
+        has_relations = pq.read_metadata(rel_pq).num_rows > 0
+        has_conflicts = pq.read_metadata(cf_pq).num_rows > 0
+
+        with self._con_lock:
+            con = self._get_read_con()
+            if has_relations:
+                for _ in range(max(0, hops)):
+                    if not frontier:
+                        break
+                    frontier_list = list(frontier)
+                    hop_rows = self._query_rows_with_con(
+                        con,
+                        "SELECT source_id, target_id FROM read_parquet(?) "
+                        "WHERE source_id IN (SELECT UNNEST(?::VARCHAR[])) "
+                        "OR target_id IN (SELECT UNNEST(?::VARCHAR[]))",
+                        [rel_pq, frontier_list, frontier_list],
+                    )
+                    next_frontier = set()
+                    for r in hop_rows:
+                        next_frontier.add(str(r["source_id"]))
+                        next_frontier.add(str(r["target_id"]))
+                    frontier = next_frontier - visited
+                    visited.update(frontier)
 
             visited_list = list(visited)
             ent_rows = self._query_rows_with_con(
@@ -814,8 +1099,8 @@ class DuckDBParquetStore:
             sub_claims = [_claim_from_row(r) for r in clm_rows]
             surviving = {e.entity_id for e in sub_entities} | {c.claim_id for c in sub_claims}
 
-            sub_relations: list[Relation] = []
-            if hops > 0 and surviving:
+            sub_relations = []
+            if hops > 0 and has_relations and surviving:
                 surviving_list = list(surviving)
                 rel_rows = self._query_rows_with_con(
                     con,
@@ -827,8 +1112,8 @@ class DuckDBParquetStore:
                 sub_relations = [_relation_from_row(r) for r in rel_rows]
 
             sub_claim_ids = {c.claim_id for c in sub_claims}
-            touched_conflicts: list[ConflictRecord] = []
-            if sub_claim_ids:
+            touched_conflicts = []
+            if sub_claim_ids and has_conflicts:
                 cf_rows = self._query_rows_with_con(con, "SELECT * FROM read_parquet(?)", [cf_pq])
                 touched_conflicts = filter_matching_conflicts(
                     [_conflict_from_row(r) for r in cf_rows],

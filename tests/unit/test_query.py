@@ -357,3 +357,59 @@ def test_hybrid_graphrag_debias_structural_heading_against_factual_answer(
         hops=0,
     )
     assert [r.claim.claim_id for r in ctx.results] == ["clm_fact_ku", "clm_heading_story"]
+
+
+def test_hybrid_graphrag_summary_fast_path_matches_fallback_and_uses_contextual_notes(
+    tmp_path: Path,
+) -> None:
+    duck = DuckDBParquetStore(tmp_path)
+    claims = [
+        Claim(
+            claim_id="clm_sec_match",
+            statement="Program coordinators track volunteer hours each semester.",
+            contextual_notes="Section: Chapter 4 Leadership",
+            source_id="src_b",
+            source_title="The Book",
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.80,
+            evidence=[Evidence(source_id="src_b", excerpt="track volunteer hours")],
+        ),
+        Claim(
+            claim_id="clm_plain",
+            statement="Program coordinators track volunteer participation annually.",
+            contextual_notes="",
+            source_id="src_b",
+            source_title="The Book",
+            reliability=ReliabilityRating.LIKELY_TRUE,
+            confidence=0.80,
+            evidence=[Evidence(source_id="src_b", excerpt="volunteer participation")],
+        ),
+    ]
+    duck.save_layer(
+        LayerData(layer=KnowledgeLayer(layer_id="sec-layer", name="Section Test"), claims=claims)
+    )
+
+    class _FallbackOnlyStore:
+        def __init__(self, inner: DuckDBParquetStore) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> object:
+            if name in {"search_claim_summaries_lexical", "get_claim_summaries_by_ids"}:
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    # Wrap DuckDB without summary methods to verify identical ranking against fast-path.
+    assert not hasattr(_FallbackOnlyStore(duck), "search_claim_summaries_lexical")
+    fast_ctx = HybridGraphRAGRetriever(duck).retrieve(
+        "sec-layer", "leadership volunteer hours", top_k=2, hops=1
+    )
+    fallback_store = _FallbackOnlyStore(duck)
+    slow_ctx = HybridGraphRAGRetriever(fallback_store).retrieve(  # type: ignore[arg-type]
+        "sec-layer", "leadership volunteer hours", top_k=2, hops=1
+    )
+
+    assert [(r.claim.claim_id, r.score, r.lexical_score) for r in fast_ctx.results] == [
+        (r.claim.claim_id, r.score, r.lexical_score) for r in slow_ctx.results
+    ]
+    assert fast_ctx.results[0].claim.claim_id == "clm_sec_match"
+    duck.close()

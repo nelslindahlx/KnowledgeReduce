@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,10 +16,28 @@ from knowledgereduce.query.analytics import k_hop_neighborhood
 from knowledgereduce.resolve.embeddings import EmbeddingProvider, HashingEmbeddingProvider
 from knowledgereduce.storage.base import (
     _SEARCH_STOP_WORDS,
+    ClaimSummary,
     GraphStore,
     filter_matching_conflicts,
     tokenize_search_query,
 )
+
+
+@runtime_checkable
+class _SummaryCapableStore(Protocol):
+    def search_claim_summaries_lexical(
+        self,
+        layer_id: str,
+        query: str,
+        *,
+        min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+        limit: int = 200,
+    ) -> list[ClaimSummary]: ...
+
+    def get_claim_summaries_by_ids(
+        self, layer_id: str, claim_ids: Sequence[str]
+    ) -> list[ClaimSummary]: ...
+
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
 _HEADING_PREFIX_RE = re.compile(r"^(?:Chapter|Section|Part|Appendix)\s*(?:\d+|[IVXLCDM]+)?[:\s]")
@@ -127,31 +147,62 @@ class HybridGraphRAGRetriever:
 
             id_to_sem = {cid: float(all_sem[i]) for i, cid in enumerate(idx_ids)}
             pool = max(candidate_pool_size, top_k * 20)
-            lexical_claims = self.store.search_claims_lexical(
-                layer_id,
-                query,
-                min_reliability=min_reliability,
-                limit=pool,
-            )
-            lexical_ids = {c.claim_id for c in lexical_claims}
+            if isinstance(self.store, _SummaryCapableStore):
+                lexical_summaries = self.store.search_claim_summaries_lexical(
+                    layer_id,
+                    query,
+                    min_reliability=min_reliability,
+                    limit=pool,
+                )
+                lexical_ids = {c.claim_id for c in lexical_summaries}
 
-            if len(idx_ids) > pool:
-                top_indices = np.argpartition(all_sem, -pool)[-pool:]
-                top_sem_ids = [idx_ids[int(i)] for i in top_indices]
-            else:
-                top_sem_ids = list(idx_ids)
+                if len(idx_ids) > pool:
+                    top_indices = np.argpartition(all_sem, -pool)[-pool:]
+                    top_sem_ids = [idx_ids[int(i)] for i in top_indices]
+                else:
+                    top_sem_ids = list(idx_ids)
 
-            missing_ids = [cid for cid in top_sem_ids if cid not in lexical_ids]
-            semantic_claims = (
-                [
-                    c
-                    for c in self.store.get_claims_by_ids(layer_id, missing_ids)
-                    if int(c.reliability) >= int(min_reliability)
+                missing_ids = [cid for cid in top_sem_ids if cid not in lexical_ids]
+                semantic_summaries = (
+                    [
+                        c
+                        for c in self.store.get_claim_summaries_by_ids(layer_id, missing_ids)
+                        if int(c.reliability) >= int(min_reliability)
+                    ]
+                    if missing_ids
+                    else []
+                )
+                candidates: list[Claim | ClaimSummary] = [
+                    *lexical_summaries,
+                    *semantic_summaries,
                 ]
-                if missing_ids
-                else []
-            )
-            candidates = [*lexical_claims, *semantic_claims]
+            else:
+                lexical_claims = self.store.search_claims_lexical(
+                    layer_id,
+                    query,
+                    min_reliability=min_reliability,
+                    limit=pool,
+                )
+                lexical_ids = {c.claim_id for c in lexical_claims}
+
+                if len(idx_ids) > pool:
+                    top_indices = np.argpartition(all_sem, -pool)[-pool:]
+                    top_sem_ids = [idx_ids[int(i)] for i in top_indices]
+                else:
+                    top_sem_ids = list(idx_ids)
+
+                missing_ids = [cid for cid in top_sem_ids if cid not in lexical_ids]
+                semantic_claims = (
+                    [
+                        c
+                        for c in self.store.get_claims_by_ids(layer_id, missing_ids)
+                        if int(c.reliability) >= int(min_reliability)
+                    ]
+                    if missing_ids
+                    else []
+                )
+                candidates = [*lexical_claims, *semantic_claims]
+
             if not candidates:
                 return RetrievedContext(layer_id=layer_id, query=query)
             sem_scores = [id_to_sem.get(c.claim_id, 0.0) for c in candidates]
@@ -193,7 +244,7 @@ class HybridGraphRAGRetriever:
         total_q_idf = sum(idf.values())
         wants_chapter = "chapter" in q_tokens
 
-        scored: list[tuple[Claim, float, float, float]] = []
+        scored: list[tuple[Claim | ClaimSummary, float, float, float]] = []
         for idx, clm in enumerate(candidates):
             s_tokens = candidate_token_sets[idx]
             matched_stmt = q_tokens & s_tokens
@@ -212,7 +263,9 @@ class HybridGraphRAGRetriever:
             context_bonus = 0.0
             unmatched_q = q_tokens - matched_stmt
             if matched_stmt and unmatched_q and total_q_idf > 0:
-                provenance_text = f"{clm.source_title} {clm.author_creator or ''}".lower()
+                provenance_text = (
+                    f"{clm.source_title} {clm.author_creator or ''} {clm.contextual_notes}"
+                ).lower()
                 prov_tokens = set(_TOKEN_RE.findall(provenance_text))
                 prov_hits = unmatched_q & prov_tokens
                 if prov_hits:
@@ -229,7 +282,21 @@ class HybridGraphRAGRetriever:
             scored.append((clm, total, round(lex, 4), round(sem, 4)))
 
         scored.sort(key=lambda item: (-item[1], item[0].claim_id))
-        top_items = scored[:top_k]
+        top_winners = scored[:top_k]
+        need_hydrate = [
+            item[0].claim_id for item in top_winners if isinstance(item[0], ClaimSummary)
+        ]
+        hydrated_map = (
+            {c.claim_id: c for c in self.store.get_claims_by_ids(layer_id, need_hydrate)}
+            if need_hydrate
+            else {}
+        )
+        top_items: list[tuple[Claim, float, float, float]] = []
+        for cand_item, total, lex, sem in top_winners:
+            if isinstance(cand_item, Claim):
+                top_items.append((cand_item, total, lex, sem))
+            elif cand_item.claim_id in hydrated_map:
+                top_items.append((hydrated_map[cand_item.claim_id], total, lex, sem))
 
         seed_ids = [clm.claim_id for clm, _total, _lex, _sem in top_items]
         graph, sub_entities, sub_conflicts = self.store.get_k_hop_subgraph(
