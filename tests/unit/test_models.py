@@ -77,6 +77,22 @@ def test_claim_schema_quality_score_and_roundtrip() -> None:
     restored = Claim.model_validate(dumped)
     assert restored == claim
 
+    # Grounded SPO triples earn structural quality bonus (+5.0 complete, +2.5 partial), capped at 100.
+    partial_claim = claim.model_copy(update={"subject_id": "ent-ku", "predicate": "FOUNDED_AT"})
+    assert partial_claim.quality_score == 84.5
+
+    grounded_claim = partial_claim.model_copy(update={"object_id": "ent-ch"})
+    assert grounded_claim.quality_score == 87.0
+
+    capped_claim = grounded_claim.model_copy(
+        update={
+            "confidence": 1.0,
+            "usage_count": 10,
+            "evidence": [Evidence(source_id=f"s{i}", excerpt="x") for i in range(5)],
+        }
+    )
+    assert capped_claim.quality_score == 100.0
+
 
 def test_claim_rejects_unknown_extra_fields() -> None:
     with pytest.raises(ValidationError):

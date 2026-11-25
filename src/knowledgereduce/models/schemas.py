@@ -224,7 +224,13 @@ class Claim(BaseModel):
         confidence_pts = self.confidence * 25.0
         usage_pts = min(self.usage_count, 10) * 1.5
         evidence_pts = min(len(self.evidence), 5) * 2.0
-        score = reliability_pts + confidence_pts + usage_pts + evidence_pts
+        grounding_pts = 0.0
+        if self.subject_id is not None and self.predicate is not None:
+            if self.object_id is not None or self.object_literal is not None:
+                grounding_pts = 5.0
+            else:
+                grounding_pts = 2.5
+        score = reliability_pts + confidence_pts + usage_pts + evidence_pts + grounding_pts
         return round(min(100.0, max(0.0, score)), 2)
 
 
