@@ -24,26 +24,27 @@ SOURCE_DOC_PATH = DATASET_DIR / "source_document.jsonl"
 GOLD_ANNOTATIONS_PATH = DATASET_DIR / "gold_annotations.json"
 BASELINE_PATH = DATASET_DIR / "baseline_v1_1_0.json"
 BASELINE_V13_PATH = DATASET_DIR / "baseline_v1_3_0.json"
+BASELINE_V14_PATH = DATASET_DIR / "baseline_v1_4_0.json"
 
 DEFAULT_REGRESSION_FLOORS: dict[str, dict[str, float | int]] = {
     "min": {
-        "core_entity_name_recall": 0.98,
-        "core_entity_typed_recall": 0.95,
-        "core_entity_type_accuracy": 0.95,
-        "alias_merge_recall": 0.95,
-        "core_fact_retention": 0.98,
-        "retrieval_hit_at_1": 0.95,
-        "retrieval_hit_at_5": 0.95,
-        "retrieval_mrr_at_5": 0.95,
-        "claim_connectivity_rate": 0.45,
-        "grounded_triple_rate": 0.20,
-        "mean_quality_score": 57.0,
+        "core_entity_name_recall": 0.99,
+        "core_entity_typed_recall": 0.98,
+        "core_entity_type_accuracy": 0.98,
+        "alias_merge_recall": 0.98,
+        "core_fact_retention": 0.99,
+        "retrieval_hit_at_1": 0.98,
+        "retrieval_hit_at_5": 0.98,
+        "retrieval_mrr_at_5": 0.98,
+        "claim_connectivity_rate": 0.50,
+        "grounded_triple_rate": 0.26,
+        "mean_quality_score": 59.0,
     },
     "max": {
         "cross_type_duplicate_count": 0,
         "heading_noise_fp_count": 0,
-        "isolated_node_ratio": 0.50,
-        "total_seconds": 10.0,
+        "isolated_node_ratio": 0.45,
+        "total_seconds": 8.0,
     },
 }
 

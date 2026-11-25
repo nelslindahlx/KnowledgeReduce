@@ -19,7 +19,7 @@ help:
 	@echo "  make test       - Run full pytest suite with 85% coverage gate"
 	@echo "  make examples   - Run all offline scripts under examples/"
 	@echo "  make notebooks  - Validate zero committed outputs and execute notebooks/"
-	@echo "  make golden     - Run Civic Honors book strict regression benchmark"
+	@echo "  make golden     - Run Civic Honors book and multi-source stack golden benchmarks"
 	@echo "  make benchmark  - Run 50-doc golden eval + 1K scaling benchmark"
 	@echo "  make local-ci   - Run complete stratified local CI (zero GitHub Actions minutes)"
 	@echo "  make audit-prs  - Verify zero open PRs and zero lingering remote feature branches"
@@ -56,6 +56,7 @@ notebooks:
 
 golden:
 	$(PYTHON) benchmarks/civichonors_book_benchmark.py --strict-regression
+	$(PYTHON) benchmarks/multisource_stack_benchmark.py --strict-regression
 
 benchmark:
 	$(PYTHON) benchmarks/run_benchmark.py --scale 1000
