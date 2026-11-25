@@ -54,21 +54,24 @@ All file paths passed to MCP tools are strictly sandboxed inside `--workspace` v
 
 ---
 
-## 2. Exposed Tools (11 Tools)
+## 2. Exposed Tools (14 Tools)
 
 | Tool | Role | Key Arguments |
 |---|---|---|
-| `ingest_source` | Crawl URLs (SSRF-safe) or read local CSV/JSON/MD/TXT files into `01_ingested.jsonl` | `local_files`, `crawl_config`, `checkpoint_name` |
+| `ingest_source` | Crawl URLs (SSRF-safe) or read local CSV/JSON/MD/HTML/TXT files into `01_ingested.jsonl` with optional SHA-256 skip-unchanged delta mode | `local_files`, `crawl_config`, `checkpoint_name`, `incremental_from_layer` |
 | `run_local_map` | Run local `deterministic`, `structured`, or `spacy` mapper into `02_mapped.jsonl` | `ingested_checkpoint`, `mapped_checkpoint`, `mapper` |
 | `submit_mapped_batch` | Inject Antigravity-extracted `MappedBatch` objects directly into `02_mapped.jsonl` | `batches`, `mapped_checkpoint`, `append` |
-| `resolve_and_reduce` | Entity resolution, 3-stage dedup, conflict detection, integrity gate → Parquet layer | `layer_id`, `layer_name`, `mapped_checkpoint`, `conflict_strategy` |
-| `stack_layers` | Compose layers via `overlay`, `union`, `intersection`, or `difference` (with optional cross-layer `reconcile`) | `layer_ids`, `target_layer_id`, `mode`, `conflict_strategy`, `reconcile` |
+| `resolve_and_reduce` | Entity resolution, 3-stage dedup, conflict detection, integrity gate → Parquet layer + optional pre-warmed `claim_embeddings.parquet` | `layer_id`, `layer_name`, `mapped_checkpoint`, `conflict_strategy`, `parent_layer_ids`, `build_embeddings_index` |
+| `stack_layers` | Compose layers via `overlay`, `union`, `intersection`, or `difference` (with optional `reconcile` & pre-warmed index) | `layer_ids`, `target_layer_id`, `mode`, `conflict_strategy`, `reconcile`, `build_embeddings_index` |
 | `diff_layers` | Compute added/removed/modified entities, claims, relations, and resolved conflicts | `left_layer_id`, `right_layer_id` |
 | `query_knowledge_graph` | Hybrid GraphRAG semantic+lexical+graph search or structured tag/category/reliability queries | `layer_id`, `query`, `category`, `tag`, `min_reliability`, `top_k`, `hops` |
 | `list_conflicts` | Inspect unresolved (`needs_review=True`) or historical `ConflictRecord`s | `layer_id`, `needs_review_only`, `limit` |
 | `resolve_conflict` | Adjudicate a conflict non-destructively into a new immutable `CURATED` child layer | `base_layer_id`, `conflict_id`, `target_layer_id`, `winning_value` |
-| `export_layer` | Export a layer inside workspace (`json`, `sharded_jsonl`, `graphml`, `gexf`, `parquet`) | `layer_id`, `format`, `output_path`, `shard_size` |
+| `export_layer` | Export a layer inside workspace (`json`, `sharded_jsonl`, `graphml`, `gexf`, `markdown`, `parquet`) | `layer_id`, `format`, `output_path`, `shard_size` |
 | `validate_layer` | Run `IntegrityValidator` and return graph connectivity & quality telemetry | `layer_id` |
+| `list_layers` | List all persisted knowledge layers and metadata in the workspace store | — |
+| `get_layer_lineage` | Inspect parent, ancestor, and descendant lineage for a stored layer | `layer_id` |
+| `analyze_graph` | Run PageRank/degree/betweenness centrality, Louvain communities, and bounded shortest paths | `layer_id`, `metric`, `top_k`, `include_communities`, `path_source_id`, `path_target_id`, `max_hops` |
 
 ---
 

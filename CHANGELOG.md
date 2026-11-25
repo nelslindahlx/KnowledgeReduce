@@ -17,6 +17,10 @@ All notable changes to KnowledgeReduce are documented in this file.
   - Extracted shared `load_layer_source_hashes` and `filter_unchanged_documents` in `src/knowledgereduce/pipeline/runner.py` (re-exported in `src/knowledgereduce/pipeline/__init__.py`) and added `skipped_unchanged` tracking to `AsyncWebCrawler` / `WebConnector` (`src/knowledgereduce/ingest/web.py`).
   - Added `SourceType.HTML` (`src/knowledgereduce/models/enums.py`), offline `HTMLConnector` (`src/knowledgereduce/ingest/files.py`, `.html`/`.htm` dispatch in `ingest_local_file`, exported in `src/knowledgereduce/ingest/__init__.py`) reusing `extract_main_text` and enforcing `ensure_within_base`.
   - Exposed `--incremental-from` + `--store` on `kr ingest`, `--parent-layer` + `--build-index/--no-build-index` on `kr reduce`, `--build-index/--no-build-index` on `kr stack`, and `kr index` in `src/knowledgereduce/cli.py`; added `incremental_from_layer`, `parent_layer_ids`, and `build_embeddings_index` parity to `ingest_source`, `resolve_and_reduce`, and `stack_layers` in `src/knowledgereduce/mcp/server.py`.
+- **Docs, Governance Parity & Coverage (`#35`)**:
+  - Bumped SemVer to `1.4.0` across `pyproject.toml`, `src/knowledgereduce/__init__.py`, and `tests/unit/test_smoke.py`.
+  - Synced `README.md`, `docs/mcp_antigravity.md`, `docs/conflicts_and_benchmarks.md`, `lessons_learned.md`, `CHANGELOG.md`, and `docs/plans/` with all `14` MCP tools, `make local-ci`, `v1.4.0` scaling/golden metrics, and Lesson 10–11; added mechanical doc-parity checks to `tests/meta/test_governance_and_invariants.py`.
+  - Expanded unit test coverage across `ingest.security`, `storage.export`, `ingest`, `cli`, and `resolve`/`reduce` validator branches, raising suite coverage above `94%`.
 
 ## [1.3.0] - 2026-11-24
 

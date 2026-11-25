@@ -57,3 +57,15 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 
 ## Lesson 9: Shared Analytics Payloads & GFM-Safe Markdown Export
 - **Design Pattern**: Rather than duplicating centrality, community detection, shortest-path, or lineage aggregation logic across CLI (`src/knowledgereduce/cli.py`) and MCP (`src/knowledgereduce/mcp/server.py`), route both interfaces through shared helpers (`build_layers_payload`, `build_layer_lineage_payload`, `build_graph_analytics_payload`) and escape newlines and pipe characters (`|`) cleanly in `src/knowledgereduce/export/markdown_export.py` (tested in `tests/unit/test_markdown_and_analytics_surfaces.py` and `tests/integration/test_mcp_server.py`).
+
+---
+
+## Lesson 10: Precomputing `O(N)` Claim Features & Zero-Copy Fixed-Size Arrow Embeddings
+- **Bottleneck**: Profiling `v1.3.0` showed `_claims_compatible_for_merge` recomputed `_YEAR_RE`, `_NUMBER_RE`, and `_APA_REF_RE` repeatedly inside `O(k^2)` dense-bucket loops (`89%` of profiled `1K` reduce time), while `save_claim_embeddings` / `load_claim_embeddings` boxed Python floats via `arr.tolist()` / `.to_pylist()` on every read.
+- **Resolution & Guard**: Precompute frozen `@dataclass(slots=True)` `_ClaimMergeFeatures` once per claim in `src/knowledgereduce/resolve/blocking.py`, store embeddings via `pa.FixedSizeListArray` with `(mtime_ns, size)` in-memory caching + explicit write/delete eviction + backward-compatible variable-size `list<float32>` fallback in `src/knowledgereduce/storage/duckdb_store.py`, and verify across `tests/unit/test_storage.py` (`1K` reduce `< 0.5s`, `10K` cold scaling `< 5s`).
+
+---
+
+## Lesson 11: Clause-Stop Boundaries Pair With Temporal Conflict Detection
+- **Trade-off Discovered**: Adding clause-stop boundaries (`during|while|since|from`) in `src/knowledgereduce/map/nlp.py` merged all paraphrase clusters on `golden_50_docs` (`bcubed_f1`: `0.9726` -> `1.0000`), but normalizing `"studied at University of Kansas during the spring of 2002"` and `"...2004"` to the same `object_literal` (`"University of Kansas"`) hides year contradictions if conflict detection only inspects object values.
+- **Resolution & Guard**: Inside `resolve_claim_conflicts()` (`src/knowledgereduce/reduce/conflicts.py`), when a functional group shares a normalized object value, check mutually exclusive single 4-digit years via the shared `_resolve_bucket_conflict` helper (`::year` conflict keys), snapshot `benchmarks/datasets/civichonors_book/baseline_v1_3_0.json`, ratchet `DEFAULT_REGRESSION_FLOORS` in `benchmarks/civichonors_book_benchmark.py`, and lock both behaviors in `tests/unit/test_map_resolve_reduce.py`.

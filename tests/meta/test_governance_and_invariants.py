@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -14,6 +15,7 @@ import yaml
 
 import knowledgereduce
 from knowledgereduce.map.nlp import _ANCHORED_VERB_MAP
+from knowledgereduce.mcp import create_mcp_server
 from knowledgereduce.models import ConflictStrategy
 from knowledgereduce.reduce import KnowledgeReducer
 from knowledgereduce.reduce.conflicts import DEFAULT_FUNCTIONAL_PREDICATES, is_functional_predicate
@@ -219,3 +221,20 @@ def test_runtime_domain_invariants_and_import_safety() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_docs_mcp_tools_and_readme_local_ci_parity(tmp_path: Path) -> None:
+    server = create_mcp_server(tmp_path)
+    tool_names = {tool.name for tool in asyncio.run(server.list_tools())}
+    mcp_doc = (REPO_ROOT / "docs" / "mcp_antigravity.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert f"({len(tool_names)} Tools)" in mcp_doc
+    for name in sorted(tool_names):
+        assert f"`{name}`" in mcp_doc, f"Missing MCP tool {name!r} in docs/mcp_antigravity.md"
+        assert f"`{name}`" in readme, f"Missing MCP tool {name!r} in README.md"
+
+    assert "make local-ci" in readme
+    assert "quality-and-tests (3.11)" not in readme
+    assert "maker-checker-gate" not in readme
+    assert f"knowledgereduce {knowledgereduce.__version__}" in readme
