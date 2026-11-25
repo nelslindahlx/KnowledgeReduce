@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
+import platform
 import sys
 from pathlib import Path
-from typing import Annotated, TextIO, cast
+from typing import Annotated, Any, TextIO, cast
 
 import structlog
 import typer
@@ -30,11 +33,13 @@ from knowledgereduce.ingest import (
 from knowledgereduce.map import load_mapped_batches, save_mapped_batches
 from knowledgereduce.mcp import create_mcp_server
 from knowledgereduce.mcp.server import (
+    build_entity_inspection_payload,
     build_graph_analytics_payload,
     build_layer_lineage_payload,
     build_layers_payload,
 )
 from knowledgereduce.models import (
+    ConflictResolutionError,
     ConflictStrategy,
     IngestionError,
     KnowledgeReduceError,
@@ -51,7 +56,12 @@ from knowledgereduce.pipeline import (
     load_layer_source_hashes,
 )
 from knowledgereduce.query import HybridGraphRAGRetriever, QueryBuilder
-from knowledgereduce.reduce import IntegrityValidator, adjudicate_conflict
+from knowledgereduce.reduce import (
+    ConflictResolutionDecision,
+    IntegrityValidator,
+    adjudicate_conflict,
+    adjudicate_conflicts,
+)
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore
 
@@ -535,6 +545,62 @@ def resolve_conflict_command(
         raise typer.Exit(code=1) from exc
 
 
+@app.command("resolve-conflicts")
+def resolve_conflicts_command(
+    base_layer_id: str = typer.Argument(..., help="Base layer ID containing conflicts."),
+    decisions_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--decisions",
+        "-d",
+        help="JSON file containing resolution items or a {'resolutions': [...]} object.",
+    ),
+    target_layer_id: str = typer.Option(
+        ..., "--target", "-t", help="Target CURATED child layer ID."
+    ),
+    notes: str = typer.Option("", "--notes", help="Default adjudication rationale notes."),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Atomically adjudicate multiple conflicts into a single CURATED child layer."""
+    try:
+        if not decisions_file.is_file():
+            raise ConflictResolutionError(f"Decisions file not found: {decisions_file}")
+        raw_payload = json.loads(decisions_file.read_text(encoding="utf-8"))
+        if isinstance(raw_payload, dict) and "resolutions" in raw_payload:
+            raw_items = raw_payload["resolutions"]
+        else:
+            raw_items = raw_payload
+        if not isinstance(raw_items, list):
+            raise ConflictResolutionError(
+                "Decisions file must contain a JSON array or a {'resolutions': [...]} object."
+            )
+        decisions = [ConflictResolutionDecision.model_validate(item) for item in raw_items]
+        with DuckDBParquetStore(store_dir) as store:
+            base_data = store.load_layer(base_layer_id)
+            curated, resolved = adjudicate_conflicts(
+                base_data,
+                decisions=decisions,
+                target_layer_id=target_layer_id,
+                default_notes=notes or "Adjudicated via CLI resolve-conflicts.",
+            )
+            store.save_layer(curated, overwrite=overwrite)
+        typer.echo(
+            json.dumps(
+                {
+                    "layer": curated.layer.model_dump(mode="json"),
+                    "resolved_count": len(resolved),
+                    "resolved_conflicts": [cf.model_dump(mode="json") for cf in resolved],
+                },
+                indent=2,
+            )
+        )
+    except (KnowledgeReduceError, ValidationError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command("layers")
 def layers_command(
     store_dir: Path = typer.Option(  # noqa: B008
@@ -601,6 +667,132 @@ def analyze_command(
     except (KnowledgeReduceError, ValidationError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+@app.command("inspect")
+def inspect_command(
+    layer_id: str = typer.Argument(..., help="Layer ID containing the entity."),
+    entity_id_or_name: str = typer.Argument(..., help="Entity ID, canonical name, or alias."),
+    max_claims: int = typer.Option(25, "--max-claims", help="Maximum linked claims to include."),
+    max_neighbors: int = typer.Option(
+        25, "--max-neighbors", help="Maximum graph neighbor entities to include."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json-output", help="Emit full JSON instead of a readable summary."
+    ),
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+) -> None:
+    """Inspect an entity, its linked claims, graph neighbors, conflicts, and cited sources."""
+    try:
+        with DuckDBParquetStore(store_dir) as store:
+            payload = build_entity_inspection_payload(
+                store,
+                layer_id,
+                entity_id_or_name,
+                max_claims=max_claims,
+                max_neighbors=max_neighbors,
+            )
+        if json_output:
+            typer.echo(json.dumps(payload, indent=2))
+            return
+
+        entity = cast(dict[str, Any], payload["entity"])
+        aliases = ", ".join(cast(list[str], entity.get("aliases", []))) or "none"
+        typer.echo(
+            f"Entity: {entity['canonical_name']} ({entity['entity_id']}, {entity['entity_type']})"
+        )
+        typer.echo(f"Layer: {payload['layer_id']} | Aliases: {aliases}")
+        typer.echo(
+            f"Claims: {payload['total_linked_claims']} | Neighbors: {payload['total_neighbors']} | "
+            f"Conflicts: {payload['conflict_count']} | Sources: {len(payload['sources'])}"
+        )
+        for claim in cast(list[dict[str, Any]], payload["claims"]):
+            typer.echo(f"  - [{claim['claim_id']}] {claim['statement']}")
+        for nb in cast(list[dict[str, Any]], payload["neighbors"]):
+            typer.echo(
+                f"  * ({nb['direction']}) {nb['relation_type']} -> {nb['canonical_name']} ({nb['entity_id']})"
+            )
+    except (KnowledgeReduceError, ValidationError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("doctor")
+def doctor_command(
+    store_dir: Path = typer.Option(  # noqa: B008
+        Path(".knowledgereduce_store"), "--store", "-s"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json-output", help="Emit structured environment and store diagnostics as JSON."
+    ),
+) -> None:
+    """Report Python, dependency, optional extra, and DuckDB/Parquet store health."""
+    import knowledgereduce
+
+    def _pkg_version(dist_name: str) -> str | None:
+        try:
+            return importlib.metadata.version(dist_name)
+        except importlib.metadata.PackageNotFoundError:
+            return None
+
+    core_deps = {
+        pkg: _pkg_version(pkg)
+        for pkg in ("duckdb", "pydantic", "networkx", "pyarrow", "typer", "mcp")
+    }
+    optional_extras = {
+        "nlp (spacy)": importlib.util.find_spec("spacy") is not None,
+        "pdf (pypdf)": importlib.util.find_spec("pypdf") is not None,
+        "embeddings (sentence_transformers)": (
+            importlib.util.find_spec("sentence_transformers") is not None
+        ),
+        "scikit-learn": importlib.util.find_spec("sklearn") is not None,
+    }
+    store_info: dict[str, Any] = {
+        "path": str(store_dir),
+        "exists": store_dir.exists(),
+        "layer_count": 0,
+        "layer_ids": [],
+    }
+    if store_dir.exists():
+        with DuckDBParquetStore(store_dir) as store:
+            layers = store.list_layers()
+        store_info["layer_count"] = len(layers)
+        store_info["layer_ids"] = [layer.layer_id for layer in layers]
+
+    payload = {
+        "knowledgereduce_version": knowledgereduce.__version__,
+        "python_version": platform.python_version(),
+        "core_dependencies": core_deps,
+        "optional_extras": optional_extras,
+        "store": store_info,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.echo(
+        f"KnowledgeReduce {payload['knowledgereduce_version']} (Python {payload['python_version']})"
+    )
+    typer.echo(
+        "Core dependencies: " + ", ".join(f"{k}={v or 'missing'}" for k, v in core_deps.items())
+    )
+    typer.echo(
+        "Optional extras: "
+        + ", ".join(
+            f"{k}={'available' if present else 'not installed'}"
+            for k, present in optional_extras.items()
+        )
+    )
+    typer.echo(
+        f"Store ({store_info['path']}): "
+        + (
+            f"ready ({store_info['layer_count']} layers)"
+            if store_info["exists"]
+            else "not initialized"
+        )
+    )
 
 
 @app.command("mcp")

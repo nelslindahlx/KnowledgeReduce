@@ -10,6 +10,7 @@ Legacy notebooks (`v17`–`v18`) suffered from a symmetric-deletion bug in `supe
    - **`source_trust_priority`:** Selects the highest-trust/highest-reliability candidate automatically and marks `needs_review=False`.
    - **`weighted_consensus`:** Aggregates `source_trust * confidence * (reliability + 1)` across supporting claims per distinct asserted value.
    - **`latest_timestamp`:** Selects the assertion with the newest `published_at` / `updated_at` timestamp.
+3. **Non-Destructive Single & Atomic Batch Adjudication:** `adjudicate_conflict()` and `adjudicate_conflicts()` (using `ConflictResolutionDecision`) produce immutable `CURATED` child layers while preserving `needs_review=True` and `CONTRADICTS` edges on claims that still participate in remaining unresolved conflicts.
 
 ---
 
@@ -102,3 +103,11 @@ Complements single-corpus benchmarks with an end-to-end deterministic workflow c
 | **GraphRAG Hit@1 & Disputed Conflict Surfacing** | **1.0000 / 1.0000** (`top_k = 3`, `hops = 1`) | 1.0000 / 1.0000 |
 | **Strict Integrity Errors / Warnings / Isolated Entities** | **0 / 0 / 0** (`mean_quality_score = 69.5`) | 0 / 0 / 0 (`≥ 65.0`) |
 | **End-to-End Runtime** | **0.176 s** | ≤ 5.0 s |
+
+---
+
+### E. `v1.6.0` Verified Measurements (SQL Pushdown, Scaling & Strict Golden Gates)
+
+- **50,000-Claim `QueryBuilder` SQL Pushdown Top-10 (`DuckDBParquetStore.list_claims`)**: **`6.82 ms` median** (`6.42`–`8.62 ms` uninstrumented across tag, reliability, confidence sort, and `LIMIT 10` — down from `1,004.6 ms` pre-pushdown).
+- **1K / 10K Scaling (`benchmarks/run_benchmark.py --scale 1000 10000`)**: `1,000` facts in **`0.689 s`** total (`0.067 s` warm, `9.76 MiB` peak); `10,000` facts in **`4.202 s`** total (`0.110 s` traced warm, `52.49 MiB` peak).
+- **Strict Golden Suites**: *Civic Honors — The Book* **`1.486 s`** (`18 / 18` metrics improved vs `v1.1.0`, `1.00` Hit@1 & MRR@5, `59.42` mean quality); Multi-Source Stacked/Incremental **`0.188 s`** (`1.00` Hit@1 & conflict recall, `0` integrity errors/warnings).

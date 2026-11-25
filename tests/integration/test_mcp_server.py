@@ -43,6 +43,7 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
     tool_names = {t.name for t in tools}
     assert tool_names == {
         "ingest_source",
+        "read_ingested_checkpoint",
         "run_local_map",
         "submit_mapped_batch",
         "resolve_and_reduce",
@@ -51,11 +52,13 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         "query_knowledge_graph",
         "list_conflicts",
         "resolve_conflict",
+        "resolve_conflicts",
         "export_layer",
         "validate_layer",
         "list_layers",
         "get_layer_lineage",
         "analyze_graph",
+        "inspect_entity",
     }
 
     # 1. Ingest local CSV + mocked web page
@@ -342,6 +345,132 @@ async def test_mcp_full_agent_in_the_loop_workflow(tmp_path: Path) -> None:
         ws / ".knowledgereduce_store" / "layers" / "ch-inc-child" / "claim_embeddings.parquet"
     ).is_file()
 
+    # 12. v1.6.0 MCP tools: read_ingested_checkpoint, inspect_entity, resolve_conflicts,
+    # directory ingest, skip_headings/skip_questions, deduplicate_claims, resources & prompts
+    read_page_1 = await server.call_tool(
+        "read_ingested_checkpoint",
+        {"checkpoint_name": "01_ingested.jsonl", "offset": 0, "limit": 1, "max_chars_per_doc": 120},
+    )
+    page_1_data = json.loads(read_page_1.content[0].text)  # type: ignore[union-attr]
+    assert page_1_data["total_documents"] == 2
+    assert page_1_data["returned_count"] == 1
+    assert page_1_data["has_more"] is True
+    assert len(page_1_data["documents"][0]["content"]) <= 120
+
+    read_filtered = await server.call_tool(
+        "read_ingested_checkpoint",
+        {"checkpoint_name": "01_ingested.jsonl", "source_id": "csv_curated"},
+    )
+    filtered_data = json.loads(read_filtered.content[0].text)  # type: ignore[union-attr]
+    assert filtered_data["total_documents"] == 1
+    assert filtered_data["documents"][0]["source_id"] == "csv_curated"
+
+    for bad_read_args in [
+        {"offset": -1},
+        {"limit": 0},
+        {"max_chars_per_doc": 10},
+        {"checkpoint_name": "../escape.jsonl"},
+    ]:
+        with pytest.raises(ToolError):
+            await server.call_tool("read_ingested_checkpoint", bad_read_args)
+
+    insp_res = await server.call_tool(
+        "inspect_entity",
+        {"layer_id": "ch-base", "entity_id_or_name": "civic honors", "max_claims": 5},
+    )
+    insp_data = json.loads(insp_res.content[0].text)  # type: ignore[union-attr]
+    assert insp_data["entity"]["canonical_name"] == "Civic Honors"
+    assert insp_data["total_linked_claims"] >= 1
+    assert insp_data["conflict_count"] >= 1
+
+    with pytest.raises(ToolError, match="not found"):
+        await server.call_tool(
+            "inspect_entity", {"layer_id": "ch-base", "entity_id_or_name": "NoSuchEntityXYZ"}
+        )
+
+    batch_cf_res = await server.call_tool(
+        "resolve_conflicts",
+        {
+            "base_layer_id": "ch-base",
+            "target_layer_id": "ch-batch-curated",
+            "resolutions": [
+                {
+                    "conflict_id": conflict_id,
+                    "winning_value": "2006",
+                    "resolution_notes": "Batch adjudicated.",
+                }
+            ],
+        },
+    )
+    batch_cf_data = json.loads(batch_cf_res.content[0].text)  # type: ignore[union-attr]
+    assert batch_cf_data["resolved_count"] == 1
+    assert batch_cf_data["layer"]["tier"] == "curated"
+
+    notes_dir = ws / "notes_corpus"
+    notes_dir.mkdir()
+    (notes_dir / "civic.md").write_text(
+        "---\ndate: 2025-02-01\ntags: [directory, mcp]\n---\n\n"
+        "Directory Heading Without Punctuation\n"
+        "Can directory ingestion feed local mapping?\n"
+        "Civic Honors collaborated with Kansas educators during campus programs.\n",
+        encoding="utf-8",
+    )
+    dir_ing = await server.call_tool(
+        "ingest_source",
+        {
+            "local_directories": [{"path": "notes_corpus", "patterns": ["*.md"]}],
+            "checkpoint_name": "01_dir.jsonl",
+        },
+    )
+    assert json.loads(dir_ing.content[0].text)["document_count"] == 1  # type: ignore[union-attr]
+
+    dir_map = await server.call_tool(
+        "run_local_map",
+        {
+            "ingested_checkpoint": "01_dir.jsonl",
+            "mapped_checkpoint": "02_dir.jsonl",
+            "skip_headings": False,
+            "skip_questions": False,
+        },
+    )
+    assert json.loads(dir_map.content[0].text)["claims"] >= 2  # type: ignore[union-attr]
+
+    dedup_stack = await server.call_tool(
+        "stack_layers",
+        {
+            "layer_ids": ["ch-base", "ch-inc-child"],
+            "target_layer_id": "ch-union-dedup",
+            "mode": "union",
+            "reconcile": True,
+            "deduplicate_claims": True,
+        },
+    )
+    assert not dedup_stack.is_error
+
+    resources = await server.list_resources()
+    assert {str(r.uri) for r in resources} == {"kr://layers"}
+    templates = await server.list_resource_templates()
+    assert {t.uri_template for t in templates} == {
+        "kr://layers/{layer_id}/manifest",
+        "kr://layers/{layer_id}/conflicts",
+    }
+
+    layers_res_read = await server.read_resource("kr://layers")
+    assert json.loads(layers_res_read[0].content)["count"] >= 4  # type: ignore[arg-type]
+    manifest_res_read = await server.read_resource("kr://layers/ch-base/manifest")
+    assert json.loads(manifest_res_read[0].content)["layer_id"] == "ch-base"  # type: ignore[arg-type]
+    conflicts_res_read = await server.read_resource("kr://layers/ch-base/conflicts")
+    assert json.loads(conflicts_res_read[0].content)["count"] >= 1  # type: ignore[arg-type]
+
+    prompts = await server.list_prompts()
+    assert {p.name for p in prompts} == {"extract_mapped_batch", "adjudicate_conflicts"}
+    extract_prompt = await server.get_prompt(
+        "extract_mapped_batch", {"checkpoint_path": "01_inc.jsonl", "source_id": "html_extra"}
+    )
+    assert "01_inc.jsonl" in extract_prompt.messages[0].content.text  # type: ignore[union-attr]
+    adj_prompt = await server.get_prompt("adjudicate_conflicts", {"layer_id": "ch-base"})
+    assert "resolve_conflicts" in adj_prompt.messages[0].content.text  # type: ignore[union-attr]
+
 
 async def test_mcp_stdio_subprocess_initialize_and_list_tools(tmp_path: Path) -> None:
     params = StdioServerParameters(
@@ -352,4 +481,4 @@ async def test_mcp_stdio_subprocess_initialize_and_list_tools(tmp_path: Path) ->
         init = await session.initialize()
         assert init.server_info.name == "knowledgereduce"
         tools_res = await session.list_tools()
-        assert len(tools_res.tools) == 14
+        assert len(tools_res.tools) == 17
