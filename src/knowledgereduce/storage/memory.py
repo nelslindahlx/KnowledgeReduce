@@ -19,8 +19,11 @@ from knowledgereduce.models import (
     StorageError,
 )
 from knowledgereduce.storage.base import (
+    ClaimSummary,
     filter_matching_conflicts,
     layer_data_to_networkx,
+    rank_claim_summaries,
+    summarize_claim,
     tokenize_search_query,
 )
 
@@ -219,6 +222,41 @@ class MemoryGraphStore:
             return []
         by_id = {c.claim_id: c for c in data.claims}
         return [by_id[cid] for cid in dict.fromkeys(claim_ids) if cid in by_id]
+
+    def search_claim_summaries_lexical(
+        self,
+        layer_id: str,
+        query: str,
+        *,
+        min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+        limit: int = 200,
+    ) -> list[ClaimSummary]:
+        """Return lightweight claim summaries ranked identically to ``search_claims_lexical``."""
+        if layer_id not in self._layers:
+            raise StorageError(f"Layer {layer_id!r} not found.")
+        data = self._layers[layer_id]
+        if limit <= 0:
+            return []
+        summaries = [summarize_claim(c) for c in data.claims]
+        lower_stmts = [c.statement.lower() for c in data.claims]
+        return rank_claim_summaries(
+            summaries,
+            lower_stmts,
+            query,
+            min_reliability=min_reliability,
+            limit=limit,
+        )
+
+    def get_claim_summaries_by_ids(
+        self, layer_id: str, claim_ids: Sequence[str]
+    ) -> list[ClaimSummary]:
+        """Fetch lightweight ``ClaimSummary`` projections matching *claim_ids*."""
+        if layer_id not in self._layers:
+            raise StorageError(f"Layer {layer_id!r} not found.")
+        if not claim_ids:
+            return []
+        by_id = {c.claim_id: c for c in self._layers[layer_id].claims}
+        return [summarize_claim(by_id[cid]) for cid in dict.fromkeys(claim_ids) if cid in by_id]
 
     def get_k_hop_subgraph(
         self,

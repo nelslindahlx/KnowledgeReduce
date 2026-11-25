@@ -25,7 +25,12 @@ from knowledgereduce.models import (
     SourceType,
     StorageError,
 )
-from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
+from knowledgereduce.storage import (
+    ClaimSummary,
+    DuckDBParquetStore,
+    GraphStore,
+    MemoryGraphStore,
+)
 
 
 def _make_sample_layer(layer_id: str = "layer-1") -> LayerData:
@@ -332,3 +337,71 @@ def test_duckdb_fixed_size_embeddings_cache_and_legacy_fallback(tmp_path: Path) 
 
     store.delete_layer("emb-cache")
     assert ("emb-cache", "m0") not in store._embedding_cache
+
+
+def test_claim_summary_projection_and_persistent_duckdb_session(tmp_path: Path) -> None:
+    sample = _make_sample_layer("summary-layer")
+    mem = MemoryGraphStore()
+    mem.save_layer(sample)
+
+    mem_summaries = mem.search_claim_summaries_lexical("summary-layer", "published 2006")
+    assert [s.claim_id for s in mem_summaries] == ["clm-1", "clm-2"]
+    assert all(isinstance(s, ClaimSummary) for s in mem_summaries)
+    assert mem.search_claim_summaries_lexical("summary-layer", "published", limit=0) == []
+    assert [s.claim_id for s in mem.get_claim_summaries_by_ids("summary-layer", ["clm-2"])] == [
+        "clm-2"
+    ]
+    assert mem.get_claim_summaries_by_ids("summary-layer", []) == []
+
+    with DuckDBParquetStore(tmp_path) as duck:
+        duck.save_layer(sample)
+        # First query initializes persistent in-memory DuckDB read connection.
+        assert [c.claim_id for c in duck.list_claims("summary-layer")] == ["clm-1", "clm-2"]
+        first_con = duck._read_con
+        assert first_con is not None
+
+        # Subsequent queries reuse the exact same DuckDB read connection.
+        assert duck.list_claim_texts("summary-layer")
+        assert duck._read_con is first_con
+
+        # Summary search matches full lexical search order and populates mtime/size cache.
+        duck_summaries = duck.search_claim_summaries_lexical("summary-layer", "published 2006")
+        duck_full = duck.search_claims_lexical("summary-layer", "published 2006")
+        assert [s.claim_id for s in duck_summaries] == [c.claim_id for c in duck_full]
+        assert (
+            duck.search_claim_summaries_lexical("summary-layer", "", limit=1)[0].claim_id == "clm-1"
+        )
+        assert duck.search_claim_summaries_lexical("summary-layer", "published", limit=0) == []
+        assert "summary-layer" in duck._claim_summary_cache
+        assert [
+            s.claim_id for s in duck.get_claim_summaries_by_ids("summary-layer", ["clm-2", "clm-1"])
+        ] == ["clm-2", "clm-1"]
+        assert duck.get_claim_summaries_by_ids("summary-layer", []) == []
+
+        # Overwrite and delete cleanly evict summary and graph caches.
+        duck.save_layer(sample, overwrite=True)
+        assert "summary-layer" not in duck._claim_summary_cache
+        duck.search_claim_summaries_lexical("summary-layer", "2006")
+        assert "summary-layer" in duck._claim_summary_cache
+
+        cached_g, cached_ents, cached_cfs = duck.get_k_hop_subgraph(
+            "summary-layer", ["clm-1"], hops=1
+        )
+        assert "summary-layer" in duck._layer_graph_cache
+
+        # Uncached DuckDB SQL fallback matches cached k-hop output identically.
+        with DuckDBParquetStore(tmp_path, graph_cache_max_rows=0) as uncached:
+            sql_g, sql_ents, sql_cfs = uncached.get_k_hop_subgraph(
+                "summary-layer", ["clm-1"], hops=1
+            )
+        assert set(cached_g.nodes) == set(sql_g.nodes)
+        assert sorted(cached_g.edges) == sorted(sql_g.edges)
+        assert {e.entity_id for e in cached_ents} == {e.entity_id for e in sql_ents}
+        assert [c.conflict_id for c in cached_cfs] == [c.conflict_id for c in sql_cfs]
+
+        duck.delete_layer("summary-layer")
+        assert "summary-layer" not in duck._claim_summary_cache
+        assert "summary-layer" not in duck._layer_graph_cache
+
+    assert duck._read_con is None
+    assert duck._claim_summary_cache == {}

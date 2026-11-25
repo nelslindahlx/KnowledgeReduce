@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import networkx as nx
@@ -97,6 +98,64 @@ def filter_matching_conflicts(
             str(cid) in claim_ids for cand in cf.candidates for cid in (cand.get("claim_ids") or [])
         )
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimSummary:
+    """Lightweight claim projection for fast lexical/hybrid scoring before full hydration."""
+
+    claim_id: str
+    statement: str
+    reliability: ReliabilityRating
+    quality_score: float
+    source_title: str = ""
+    author_creator: str | None = None
+    contextual_notes: str = ""
+
+
+def summarize_claim(claim: Claim) -> ClaimSummary:
+    """Project a full ``Claim`` into a lightweight ``ClaimSummary``."""
+    return ClaimSummary(
+        claim_id=claim.claim_id,
+        statement=claim.statement,
+        reliability=claim.reliability,
+        quality_score=claim.quality_score,
+        source_title=claim.source_title,
+        author_creator=claim.author_creator,
+        contextual_notes=claim.contextual_notes,
+    )
+
+
+def rank_claim_summaries(
+    summaries: Sequence[ClaimSummary],
+    lower_statements: Sequence[str],
+    query: str,
+    *,
+    min_reliability: ReliabilityRating = ReliabilityRating.UNKNOWN,
+    limit: int = 200,
+) -> list[ClaimSummary]:
+    """Rank claim summaries by token matches, ``quality_score``, and ``claim_id``."""
+    if limit <= 0:
+        return []
+    tokens = tokenize_search_query(query)
+    min_rel = int(min_reliability)
+    if tokens:
+        scored = [
+            (
+                -sum(1 for tok in tokens if tok in stmt_low),
+                -summary.quality_score,
+                summary.claim_id,
+                summary,
+            )
+            for summary, stmt_low in zip(summaries, lower_statements, strict=True)
+            if int(summary.reliability) >= min_rel
+        ]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in scored[:limit]]
+
+    filtered = [summary for summary in summaries if int(summary.reliability) >= min_rel]
+    filtered.sort(key=lambda summary: (-summary.quality_score, summary.claim_id))
+    return filtered[:limit]
 
 
 @runtime_checkable

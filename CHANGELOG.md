@@ -2,6 +2,14 @@
 
 All notable changes to KnowledgeReduce are documented in this file.
 
+## [1.5.0] - 2026-11-24
+
+### Added
+- **Phase 1: Sub-15ms Warm GraphRAG via Persistent DuckDB Session & Claim Projection Cache (`#42`)**:
+  - Added frozen `@dataclass(slots=True)` `ClaimSummary`, `summarize_claim()`, and shared `rank_claim_summaries()` in `src/knowledgereduce/storage/base.py` (re-exported in `src/knowledgereduce/storage/__init__.py`) and added matching summary lookup/ranking methods on `MemoryGraphStore` (`src/knowledgereduce/storage/memory.py`).
+  - Updated `DuckDBParquetStore` (`src/knowledgereduce/storage/duckdb_store.py`) with a thread-safe persistent `:memory:` DuckDB read session (`_read_con`, `_con_lock`, `close()`, context manager), `(mtime_ns, size)`-validated `_claim_summary_cache` + `_layer_graph_cache` (`graph_cache_max_rows=50_000` with SQL fallback) evicted in `_invalidate_layer_caches()`, and empty `conflicts.parquet` / `relations.parquet` scan guards in `get_k_hop_subgraph()`.
+  - Updated `HybridGraphRAGRetriever.retrieve()` (`src/knowledgereduce/query/graphrag.py`) to score lightweight `ClaimSummary` projections (including `contextual_notes` in provenance matching) and hydrate full Pydantic `Claim` objects only for `top_k` winners, cutting uninstrumented Book warm query latency from `51.2 ms` -> `10.7 ms` steady (`11.1 ms` first pass) and `10K` warm query latency to `21.4 ms` (`13.2 ms` steady).
+
 ## [1.4.0] - 2026-11-24
 
 ### Added
