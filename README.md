@@ -41,7 +41,7 @@ Verify the installation:
 
 ```bash
 uv run kr version
-# knowledgereduce 1.6.0
+# knowledgereduce 1.6.1
 ```
 
 ---

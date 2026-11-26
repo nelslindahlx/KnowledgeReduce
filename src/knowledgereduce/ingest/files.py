@@ -41,11 +41,27 @@ def _parse_markdown_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
         if lines[idx].strip() == "---":
             fm_raw = "".join(lines[1:idx])
             body = "".join(lines[idx + 1 :])
-            parsed = yaml.safe_load(fm_raw)
+            try:
+                parsed = yaml.safe_load(fm_raw)
+            except yaml.YAMLError:
+                return {}, raw
             if isinstance(parsed, dict):
                 return parsed, body.strip()
             break
     return {}, raw
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Recursively normalize YAML/frontmatter values into JSON-serializable primitives."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
 
 
 def _parse_frontmatter_date(value: Any) -> datetime | None:
@@ -190,7 +206,9 @@ class MarkdownConnector:
         raw = resolved.read_text(encoding="utf-8")
         fm, body = _parse_markdown_frontmatter(raw)
         doc_title = self.title or str(fm.get("title") or resolved.stem)
-        doc_author = self.author or (str(fm["author"]) if "author" in fm else None)
+        raw_author = fm.get("author")
+        fm_author = str(raw_author).strip() if raw_author is not None else ""
+        doc_author = self.author or (fm_author or None)
         published_at = _parse_frontmatter_date(
             fm.get("published_at") if "published_at" in fm else fm.get("date")
         )
@@ -206,7 +224,7 @@ class MarkdownConnector:
                 fetched_at=utc_now(),
                 content=body.strip(),
                 trust_weight=self.trust_weight,
-                metadata={"frontmatter": fm, "tags": tags},
+                metadata={"frontmatter": _json_safe_value(fm), "tags": tags},
             )
         ]
 

@@ -376,3 +376,51 @@ def test_pipeline_local_directories_incremental_delta(tmp_path: Path) -> None:
     delta_docs = runner.ingest(cfg_v2)
     assert len(delta_docs) == 1
     assert delta_docs[0].title == "beta"
+
+
+def test_pipeline_end_to_end_unquoted_yaml_date_and_published_range_query(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from knowledgereduce.query import QueryBuilder
+
+    docs_dir = tmp_path / "yaml_dates_dir"
+    docs_dir.mkdir()
+    (docs_dir / "policy.md").write_text(
+        "---\n"
+        "title: Policy Brief\n"
+        "author: null\n"
+        "date: 2024-06-15\n"
+        "tags: [civic, policy]\n"
+        "---\n\n"
+        "Civic Honors collaborated with Kansas educators to promote civic engagement.\n",
+        encoding="utf-8",
+    )
+
+    store_dir = tmp_path / "yaml_store"
+    runner = PipelineRunner()
+    layer_data = runner.run(
+        PipelineConfig(
+            layer_id="yaml-v1",
+            layer_name="YAML Dates V1",
+            store_dir=str(store_dir),
+            local_directories=[LocalDirectorySourceConfig(path=str(docs_dir), patterns=["*.md"])],
+            min_sentence_length=15,
+            min_claim_length=15,
+            build_embeddings_index=False,
+        )
+    )
+    assert layer_data.sources[0].author is None
+    assert layer_data.sources[0].published_at == datetime(2024, 6, 15, 0, 0, tzinfo=UTC)
+
+    with DuckDBParquetStore(store_dir) as store:
+        matched = (
+            QueryBuilder(store, "yaml-v1")
+            .filter_tag("civic")
+            .filter_published_range(
+                after=datetime(2024, 1, 1, tzinfo=UTC),
+                before=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+            .execute_claims()
+        )
+        assert len(matched) == 1
+        assert matched[0].published_at == datetime(2024, 6, 15, 0, 0, tzinfo=UTC)

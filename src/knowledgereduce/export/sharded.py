@@ -107,7 +107,9 @@ def export_layer_sharded(
         },
         "shards": shards,
     }
-    (target_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (target_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, default=str), encoding="utf-8"
+    )
     return target_dir
 
 

@@ -203,7 +203,7 @@ class StructuredMapper:
         relations_by_id: dict[str, Relation] = {}
 
         for idx, row in enumerate(rows):
-            row_excerpt = json.dumps(row, ensure_ascii=False)[:300]
+            row_excerpt = json.dumps(row, ensure_ascii=False, default=str)[:300]
             evidence = Evidence(
                 source_id=doc.source_id,
                 uri=doc.uri,

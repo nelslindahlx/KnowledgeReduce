@@ -4,6 +4,14 @@ All notable changes to KnowledgeReduce are documented in this file.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-26
+
+### Fixed
+- **Markdown Frontmatter & DuckDB JSON Serialization Hardening:**
+  - Normalized YAML frontmatter values via `_json_safe_value()` in `src/knowledgereduce/ingest/files.py` so unquoted YAML `date:`/`datetime` objects serialize cleanly as ISO strings in `SourceDocument.metadata["frontmatter"]`, hardened `author: null` handling to preserve `None`, and guarded `_parse_markdown_frontmatter()` against `yaml.YAMLError` when Markdown files begin with non-frontmatter `---` horizontal rules.
+  - Added `default=str` to `json.dumps(...)` in `DuckDBParquetStore.save_layer()` (`src/knowledgereduce/storage/duckdb_store.py`) for `metadata_json`, `attributes_json`, and `manifest.json`, plus `src/knowledgereduce/map/structured.py`, `src/knowledgereduce/export/json_export.py`, and `src/knowledgereduce/export/sharded.py`.
+  - Added end-to-end and unit regression tests across `tests/unit/test_ingest.py`, `tests/unit/test_storage.py`, and `tests/unit/test_pipeline_incremental.py`, and bumped SemVer to `1.6.1`.
+
 ## [1.6.0] - 2026-11-25
 
 ### Added
