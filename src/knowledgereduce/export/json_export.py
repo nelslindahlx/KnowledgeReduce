@@ -58,7 +58,7 @@ def export_layer_json(
     if include_networkx:
         payload["networkx_graph"] = node_link_data_compat(layer_data_to_networkx(layer_data))
 
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return target
 
 

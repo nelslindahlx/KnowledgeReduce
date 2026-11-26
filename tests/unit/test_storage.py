@@ -477,3 +477,22 @@ def test_duckdb_save_layer_atomic_overwrite_rollback_and_filter_edges(
         assert [layer.layer_id for layer in duck.list_layers()] == ["atomic-v1"]
         leftover_tmp = [p for p in duck.layers_dir.iterdir() if p.name.startswith(".staging_")]
         assert leftover_tmp == []
+
+
+def test_duckdb_save_layer_serializes_raw_date_objects_in_metadata_and_attributes(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, date, datetime
+
+    sample = _make_sample_layer("raw-dates")
+    sample.sources[0].metadata["raw_date"] = date(2024, 6, 15)
+    sample.sources[0].metadata["raw_dt"] = datetime(2025, 1, 10, 12, 0, tzinfo=UTC)
+    sample.entities[0].attributes["created_on"] = date(2006, 1, 1)
+    sample.relations[0].attributes["verified_on"] = date(2025, 3, 1)
+
+    with DuckDBParquetStore(tmp_path) as duck:
+        duck.save_layer(sample)
+        reloaded = duck.load_layer("raw-dates")
+        assert reloaded.sources[0].metadata["raw_date"] == "2024-06-15"
+        assert reloaded.entities[0].attributes["created_on"] == "2006-01-01"
+        assert reloaded.relations[0].attributes["verified_on"] == "2025-03-01"

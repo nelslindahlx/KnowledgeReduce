@@ -44,7 +44,7 @@ from knowledgereduce.resolve import HashingEmbeddingProvider
 from knowledgereduce.stack import StackManager
 from knowledgereduce.storage import DuckDBParquetStore, GraphStore, MemoryGraphStore
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 __all__ = [
     "Claim",

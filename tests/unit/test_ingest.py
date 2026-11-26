@@ -542,3 +542,37 @@ def test_directory_connector_globs_filtering_and_symlink_safety(
     escape_link.symlink_to(outside_file)
     with pytest.raises(PathSecurityError):
         ingest_local_directory(corpus)
+
+
+def test_markdown_frontmatter_json_safety_author_null_and_malformed_yaml(tmp_path: Path) -> None:
+    import json
+
+    md_dates = tmp_path / "dates.md"
+    md_dates.write_text(
+        "---\n"
+        "title: Date Frontmatter\n"
+        "author: null\n"
+        "date: 2024-06-15\n"
+        "published_at: 2025-01-10T00:00:00Z\n"
+        "nested:\n"
+        "  reviewed_on: 2025-02-01\n"
+        "tags: [civic]\n"
+        "---\n\n"
+        "Civic Honors collaborated with Kansas educators.\n",
+        encoding="utf-8",
+    )
+    doc = MarkdownConnector(md_dates).ingest()[0]
+    assert doc.author is None
+    assert doc.published_at == datetime(2025, 1, 10, 0, 0, tzinfo=UTC)
+    serialized = json.dumps(doc.metadata)
+    assert "2024-06-15" in serialized
+    assert "2025-02-01" in serialized
+
+    md_bad_yaml = tmp_path / "horizontal_rule.md"
+    md_bad_yaml.write_text(
+        "---\nkey: [unclosed bracket\n---\n\nBody continues after rule.\n",
+        encoding="utf-8",
+    )
+    bad_doc = MarkdownConnector(md_bad_yaml).ingest()[0]
+    assert bad_doc.metadata["frontmatter"] == {}
+    assert "Body continues" in bad_doc.content

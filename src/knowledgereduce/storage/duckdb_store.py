@@ -434,7 +434,7 @@ class DuckDBParquetStore:
                         "content": s.content,
                         "content_sha256": s.content_sha256,
                         "trust_weight": s.trust_weight,
-                        "metadata_json": json.dumps(s.metadata),
+                        "metadata_json": json.dumps(s.metadata, default=str),
                     }
                     for s in layer_data.sources
                 ]
@@ -444,7 +444,7 @@ class DuckDBParquetStore:
                         "canonical_name": e.canonical_name,
                         "entity_type": e.entity_type,
                         "aliases_json": json.dumps(e.aliases),
-                        "attributes_json": json.dumps(e.attributes),
+                        "attributes_json": json.dumps(e.attributes, default=str),
                         "evidence_json": json.dumps(
                             [ev.model_dump(mode="json") for ev in e.evidence]
                         ),
@@ -495,7 +495,7 @@ class DuckDBParquetStore:
                         "evidence_json": json.dumps(
                             [ev.model_dump(mode="json") for ev in r.evidence]
                         ),
-                        "attributes_json": json.dumps(r.attributes),
+                        "attributes_json": json.dumps(r.attributes, default=str),
                     }
                     for r in layer_data.relations
                 ]
@@ -540,7 +540,7 @@ class DuckDBParquetStore:
                     "files": files_meta,
                 }
                 (staging_dir / "manifest.json").write_text(
-                    json.dumps(manifest, indent=2), encoding="utf-8"
+                    json.dumps(manifest, indent=2, default=str), encoding="utf-8"
                 )
 
                 if target_dir.exists():

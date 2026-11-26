@@ -93,3 +93,9 @@ Verified engineering insights, bug root causes, and optimization patterns discov
 ## Lesson 15: Guarded Shared Claims During Atomic Batch Conflict Adjudication
 - **Risk Identified**: Clearing `needs_review=False` or removing all `CONTRADICTS` edges for every participating claim ID in a resolved conflict can clear flags prematurely when the same claim participates in another still-open dispute.
 - **Resolution & Guard**: Compute per-conflict resolved claim sets alongside remaining unresolved conflict claim sets in `adjudicate_conflicts()` (`src/knowledgereduce/reduce/conflicts.py`), clearing `needs_review` and removing `CONTRADICTS` edges only when the claim/edge no longer belongs to any open `needs_review=True` conflict, locked by multi-conflict regression tests in `tests/unit/test_map_resolve_reduce.py`.
+
+---
+
+## Lesson 16: YAML `date` Objects Inside `yaml.safe_load()` Frontmatter Metadata
+- **Bug Caught**: Live end-to-end testing on Markdown files containing unquoted ISO frontmatter (`date: 2024-06-15`) crashed `DuckDBParquetStore.save_layer()` (`src/knowledgereduce/storage/duckdb_store.py`) with `TypeError: Object of type date is not JSON serializable` because PyYAML parses unquoted dates into `datetime.date` objects while `SourceDocument.metadata` was persisted with bare `json.dumps(...)`.
+- **Resolution & Guard**: Recursively normalize YAML frontmatter values via `_json_safe_value()` inside `src/knowledgereduce/ingest/files.py` (alongside `yaml.YAMLError` fallback and `author: null` normalization), add `default=str` to `json.dumps` calls across `src/knowledgereduce/storage/duckdb_store.py`, `src/knowledgereduce/map/structured.py`, `src/knowledgereduce/export/json_export.py`, and `src/knowledgereduce/export/sharded.py`, and lock end-to-end YAML `date` ingestion -> DuckDB persistence -> `QueryBuilder` filtering in `tests/unit/test_ingest.py`, `tests/unit/test_storage.py`, and `tests/unit/test_pipeline_incremental.py`.
